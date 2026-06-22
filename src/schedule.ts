@@ -55,10 +55,16 @@ export async function buildScheduleResponse(
     addDaysToDateString(centerDate, input.days + 1),
   );
   const data = await loadBangumiData(env);
+  const subjectIds = collectScheduleSubjectIds(
+    data.items ?? [],
+    windowStart,
+    windowEnd,
+  );
   const enrichment = await loadScheduleEnrichment(
     env,
     windowStart,
     windowEnd,
+    subjectIds,
   ).catch((error) => {
     console.warn("schedule enrichment unavailable", error);
     return new Map<number, SubjectListItem>();
@@ -128,6 +134,7 @@ async function loadScheduleEnrichment(
   env: Env,
   start: Date,
   end: Date,
+  subjectIds: number[],
 ): Promise<Map<number, SubjectListItem>> {
   const client = new BangumiClient(env);
   const bySubjectId = new Map<number, SubjectListItem>();
@@ -167,6 +174,15 @@ async function loadScheduleEnrichment(
         bySubjectId.set(subject.subjectId, subject);
     }),
   );
+
+  const preciseSubjects = await client
+    .getSubjectsByIds(subjectIds)
+    .catch((error) => {
+      console.warn("Bangumi precise schedule enrichment unavailable", error);
+      return [];
+    });
+  for (const subject of preciseSubjects)
+    bySubjectId.set(subject.subjectId, subject);
 
   return bySubjectId;
 }
@@ -286,6 +302,23 @@ function buildSchedule(
       Date.parse(a.airingAt) - Date.parse(b.airingAt) ||
       a.displayName.localeCompare(b.displayName, "zh-Hans-CN"),
   );
+}
+
+function collectScheduleSubjectIds(
+  items: BangumiDataItem[],
+  start: Date,
+  end: Date,
+): number[] {
+  const subjectIds = new Set<number>();
+  for (const item of items) {
+    if (!["tv", "web"].includes(item.type ?? "")) continue;
+    if (!item.broadcast && !item.begin) continue;
+    const occurrences = expandRule(item, start, end);
+    if (!occurrences?.length) continue;
+    const subjectId = subjectIdFromSites(pickSites(item.sites ?? []));
+    if (subjectId) subjectIds.add(subjectId);
+  }
+  return [...subjectIds];
 }
 
 function pickNames(item: BangumiDataItem): {

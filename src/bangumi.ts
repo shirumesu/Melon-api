@@ -201,6 +201,10 @@ export class BangumiClient {
     return this.mapSubjectListItem(subject);
   }
 
+  async getSubjectsByIds(subjectIds: number[]): Promise<SubjectListItem[]> {
+    return mapLimit(subjectIds, 8, (subjectId) => this.getSubject(subjectId));
+  }
+
   async getSubjectRaw(subjectId: number): Promise<BangumiSubject> {
     return this.fetchJson<BangumiSubject>(`/v0/subjects/${subjectId}`);
   }
@@ -474,4 +478,24 @@ export function subjectIdFromSites(
 ): number | undefined {
   const bgm = sites.find((site) => site.site === "bangumi" && site.id != null);
   return toInt(typeof bgm?.id === "string" ? Number(bgm.id) : bgm?.id);
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = [];
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await mapper(items[index]!);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }

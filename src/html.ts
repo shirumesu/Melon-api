@@ -10,27 +10,32 @@ export async function fetchSubjectComments(
     `/subject/${subjectId}/comments`,
   ).catch(() => "");
   if (!html) return [];
-  return postBlocks(html)
-    .slice(0, 20)
+  return subjectCommentBlocks(html)
     .flatMap((block) => {
-      const nickname = postNickname(block);
+      const username = firstMatch(block, /data-item-user="([^"]+)"/);
+      const nickname = subjectCommentNickname(block);
       const avatar = firstMatch(
         block,
         /<span class="avatarNeue[^"]*"[^>]*style="background-image:url\('([^']+)'\)/,
       );
-      const text = postMessage(block);
+      const text = subjectCommentMessage(block);
       const score = firstMatch(block, /starlight stars(\d+)/);
-      const time = postTime(block);
+      const status = subjectCommentStatus(block);
+      const time = subjectCommentTime(block);
       if (!nickname || !text) return [];
       return [
         {
+          id: firstMatch(block, /likes_grid_(\d+)/),
           user: {
+            username,
             nickname,
             avatarUrl: normalizeUrl(env, avatar),
           },
           score: score ? Number(score) : undefined,
+          status: status || undefined,
           createdAt: time || undefined,
           text,
+          url: `${baseWeb(env)}/subject/${subjectId}/comments`,
         },
       ];
     });
@@ -135,6 +140,61 @@ function postBlocks(html: string): string[] {
   );
 }
 
+function subjectCommentBlocks(html: string): string[] {
+  const commentBox = sliceFromTo(
+    html,
+    '<div id="comment_box"',
+    [
+      '<template id="likes_reaction_grid_item"',
+      '<div class="page_inner"',
+      '<div id="columnInSubjectB"',
+    ],
+  );
+  if (!commentBox) return postBlocks(html).slice(0, 20);
+  const starts = Array.from(
+    commentBox.matchAll(/<div class="item clearit" data-item-user="[^"]+"/g),
+    (match) => match.index ?? -1,
+  ).filter((index) => index >= 0);
+  return starts.slice(0, 20).map((start, index) =>
+    commentBox.slice(start, starts[index + 1] ?? commentBox.length),
+  );
+}
+
+function subjectCommentNickname(block: string): string {
+  return stripTags(
+    firstMatch(
+      block,
+      /<a href="\/user\/[^"]+" class="l">([\s\S]*?)<\/a>/,
+    ) ?? "",
+  );
+}
+
+function subjectCommentMessage(block: string): string {
+  return htmlDecode(
+    firstMatch(block, /<p class="comment">([\s\S]*?)<\/p>/) ?? "",
+  );
+}
+
+function subjectCommentStatus(block: string): string {
+  const smallTexts = greySmallTexts(block);
+  return smallTexts.find((text) => text && !text.startsWith("@")) ?? "";
+}
+
+function subjectCommentTime(block: string): string {
+  return (
+    greySmallTexts(block)
+      .find((text) => text.startsWith("@"))
+      ?.replace(/^@\s*/, "") ?? ""
+  );
+}
+
+function greySmallTexts(block: string): string[] {
+  return Array.from(
+    block.matchAll(/<small[^>]*class="grey"[^>]*>([\s\S]*?)<\/small>/g),
+    (match) => stripTags(match[1] ?? ""),
+  );
+}
+
 function postNickname(block: string): string {
   return stripTags(
     firstMatch(block, /<strong[^>]*>([\s\S]*?)<\/strong>/) ?? "",
@@ -167,6 +227,19 @@ function matchAll(value: string, pattern: RegExp): string[] {
 
 function firstMatch(value: string, pattern: RegExp): string | undefined {
   return pattern.exec(value)?.[1];
+}
+
+function sliceFromTo(
+  value: string,
+  startNeedle: string,
+  endNeedles: string[],
+): string {
+  const start = value.indexOf(startNeedle);
+  if (start < 0) return "";
+  const ends = endNeedles
+    .map((needle) => value.indexOf(needle, start + startNeedle.length))
+    .filter((index) => index > start);
+  return value.slice(start, ends.length ? Math.min(...ends) : value.length);
 }
 
 function normalizeUrl(env: Env, value: string | undefined): string | undefined {

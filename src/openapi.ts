@@ -132,6 +132,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
               "是否绕过 R2 缓存重新请求 Bangumi。调试时使用，客户端正常不要传。",
             ),
           ],
+          security: optionalBearerSecurity(),
           responses: {
             "200": response(
               "分页番剧列表",
@@ -160,6 +161,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             }),
             forceQueryParam(),
           ],
+          security: optionalBearerSecurity(),
           responses: {
             "200": response(
               "番剧详情",
@@ -216,6 +218,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             pathId("episodeId", "Bangumi episode ID。"),
             forceQueryParam(),
           ],
+          security: optionalBearerSecurity(),
           responses: {
             "200": response(
               "单集详情",
@@ -241,6 +244,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             pathId("episodeId", "Bangumi episode ID。"),
             forceQueryParam(),
           ],
+          security: optionalBearerSecurity(),
           responses: {
             "200": response("单集评论列表", htmlListResponse("EpisodeComment")),
             "500": errorResponse,
@@ -290,6 +294,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             ),
             forceQueryParam("是否绕过 R2 缓存重新生成。"),
           ],
+          security: optionalBearerSecurity(),
           responses: {
             "200": response(
               "播出时间表",
@@ -341,6 +346,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             ),
             forceQueryParam(),
           ],
+          security: optionalBearerSecurity(),
           responses: {
             "200": response(
               "今日更新",
@@ -433,9 +439,9 @@ export function docsHtml(): string {
         dom_id: "#swagger-ui",
         deepLinking: true,
         displayRequestDuration: true,
-        defaultModelsExpandDepth: 1,
-        defaultModelExpandDepth: 2,
-        docExpansion: "list",
+        defaultModelsExpandDepth: -1,
+        defaultModelExpandDepth: 1,
+        docExpansion: "none",
         persistAuthorization: true
       });
       const zhText = new Map([
@@ -883,6 +889,7 @@ function listChildEndpoint(
         pathId("subjectId", "Bangumi subject ID。"),
         forceQueryParam(),
       ],
+      security: optionalBearerSecurity(),
       responses: {
         "200": response(
           summary,
@@ -912,6 +919,7 @@ function htmlListEndpoint(
         pathId("subjectId", "Bangumi subject ID。"),
         forceQueryParam(),
       ],
+      security: optionalBearerSecurity(),
       responses: {
         "200": response(summary, htmlListResponse(itemSchema)),
         "500": response("错误响应", schemaRef("ApiError")),
@@ -964,6 +972,7 @@ function seasonEndpoint(
         ),
         forceQueryParam(),
       ],
+      security: optionalBearerSecurity(),
       responses: {
         "200": response(
           summary,
@@ -1032,6 +1041,10 @@ function forceQueryParam(description = "是否绕过 R2 缓存。"): unknown {
     `${description} 需要 Authorization: Bearer <ADMIN_TOKEN>。`,
     { default: false },
   );
+}
+
+function optionalBearerSecurity(): unknown[] {
+  return [{ bearerAuth: [] }, {}];
 }
 
 function arrayQueryParam(
