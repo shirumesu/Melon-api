@@ -152,7 +152,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           description: [
             "获取单个 Bangumi subject 的详情。默认 full=true，会聚合 subject 基础信息、章节、角色/声优、制作人员、关联条目、吐槽箱、讨论版、播出时间。",
             "full=false 时只返回简略 SubjectListItem，适合列表补全或低成本探测。",
-            "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
+            "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；full=true 时每次响应都会实时解析并覆盖缓存详情里的 comments/topics，解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
           ].join("\n\n"),
           parameters: [
             pathId("subjectId", "Bangumi subject ID。"),
@@ -200,12 +200,12 @@ export function openApiSpec(publicBaseUrl: string): unknown {
       ),
       "/v1/subjects/{subjectId}/comments": htmlListEndpoint(
         "番剧吐槽箱",
-        "从 Bangumi subject 页面解析公开吐槽箱。官方 v0 API 暂不提供该数据，因此这是 best-effort 数据源。",
+        "从 Bangumi subject 页面实时解析公开吐槽箱，不读写 R2 缓存。官方 v0 API 暂不提供该数据，因此这是 best-effort 数据源。",
         "SubjectComment",
       ),
       "/v1/subjects/{subjectId}/topics": htmlListEndpoint(
         "番剧讨论版主题",
-        "从 Bangumi subject 页面解析公开讨论版主题。适合详情页展示最近讨论。",
+        "从 Bangumi subject 页面实时解析公开讨论版主题，不读写 R2 缓存。适合详情页展示最近讨论。",
         "Topic",
       ),
       "/v1/episodes/{episodeId}": {
@@ -237,13 +237,10 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           tags: ["章节"],
           summary: "获取单集评论",
           description: [
-            "从 Bangumi 单集页面 HTML 解析公开评论。官方 v0 API 暂不提供 episode comments。",
+            "从 Bangumi 单集页面 HTML 实时解析公开评论，不读写 R2 缓存。官方 v0 API 暂不提供 episode comments。",
             "如果 Bangumi 页面结构变化、评论需要登录、或被访问限制，data 可能为空；此时 source.available=false。",
           ].join("\n\n"),
-          parameters: [
-            pathId("episodeId", "Bangumi episode ID。"),
-            forceQueryParam(),
-          ],
+          parameters: [pathId("episodeId", "Bangumi episode ID。")],
           security: optionalBearerSecurity(),
           responses: {
             "200": response("单集评论列表", htmlListResponse("EpisodeComment")),
@@ -915,10 +912,7 @@ function htmlListEndpoint(
       tags: ["番剧"],
       summary,
       description,
-      parameters: [
-        pathId("subjectId", "Bangumi subject ID。"),
-        forceQueryParam(),
-      ],
+      parameters: [pathId("subjectId", "Bangumi subject ID。")],
       security: optionalBearerSecurity(),
       responses: {
         "200": response(summary, htmlListResponse(itemSchema)),
@@ -1005,9 +999,8 @@ function htmlListResponse(itemSchema: string): unknown {
     {
       data: arrayOf(itemSchema),
       source: schemaRef("HtmlSource"),
-      cache: schemaRef("CacheMeta"),
     },
-    ["data", "source", "cache"],
+    ["data", "source"],
   );
 }
 

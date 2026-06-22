@@ -109,16 +109,16 @@ async function route(
     return getSubjectStaff(Number(path.split("/")[2]), url, env);
   }
   if (request.method === "GET" && /^v1\/subjects\/\d+\/comments$/.test(path)) {
-    return getSubjectComments(Number(path.split("/")[2]), url, env);
+    return getSubjectComments(Number(path.split("/")[2]), env);
   }
   if (request.method === "GET" && /^v1\/subjects\/\d+\/topics$/.test(path)) {
-    return getSubjectTopics(Number(path.split("/")[2]), url, env);
+    return getSubjectTopics(Number(path.split("/")[2]), env);
   }
   if (request.method === "GET" && /^v1\/episodes\/\d+$/.test(path)) {
     return getEpisode(Number(path.split("/")[2]), url, env);
   }
   if (request.method === "GET" && /^v1\/episodes\/\d+\/comments$/.test(path)) {
-    return getEpisodeComments(Number(path.split("/")[2]), url, env);
+    return getEpisodeComments(Number(path.split("/")[2]), env);
   }
   if (request.method === "GET" && path === "v1/schedule/latest")
     return getSchedule(url, env);
@@ -190,8 +190,6 @@ async function getSubject(
         characters,
         staff,
         relatedSubjects,
-        comments,
-        topics,
         schedule,
       ] = await Promise.all([
         client.getEpisodes(subjectId).catch((error) => {
@@ -210,14 +208,6 @@ async function getSubject(
           notes.push(note("relatedSubjects", error));
           return [];
         }),
-        fetchSubjectComments(env, subjectId).catch((error) => {
-          notes.push(note("commentsHtml", error));
-          return [];
-        }),
-        fetchSubjectTopics(env, subjectId).catch((error) => {
-          notes.push(note("topicsHtml", error));
-          return [];
-        }),
         getScheduleValue(url, env).catch((error) => {
           notes.push(note("schedule", error));
           return null;
@@ -229,8 +219,8 @@ async function getSubject(
         characters,
         staff,
         relatedSubjects,
-        comments,
-        topics,
+        comments: [],
+        topics: [],
         notes,
       });
       detail.schedule = schedule
@@ -240,7 +230,68 @@ async function getSubject(
       return detail;
     },
   );
-  return json({ data: result.value, cache: result.cache });
+  const data = full
+    ? await withLiveSubjectHtmlParts(
+        result.value as SubjectDetail,
+        subjectId,
+        env,
+      )
+    : result.value;
+  return json(
+    { data, cache: result.cache },
+    full ? { headers: { "cache-control": "no-store" } } : {},
+  );
+}
+
+async function withLiveSubjectHtmlParts(
+  detail: SubjectDetail,
+  subjectId: number,
+  env: Env,
+): Promise<SubjectDetail> {
+  const { comments, topics, notes } = await fetchLiveSubjectHtmlParts(
+    env,
+    subjectId,
+  );
+  const stableNotes = detail.source.notes.filter(
+    (entry) =>
+      !entry.startsWith("commentsHtml:") && !entry.startsWith("topicsHtml:"),
+  );
+  return {
+    ...detail,
+    comments,
+    topics,
+    source: {
+      ...detail.source,
+      apiCoverage: {
+        ...detail.source.apiCoverage,
+        comments: comments.length > 0,
+        topics: topics.length > 0,
+      },
+      notes: [...stableNotes, ...notes],
+    },
+  };
+}
+
+async function fetchLiveSubjectHtmlParts(
+  env: Env,
+  subjectId: number,
+): Promise<{
+  comments: SubjectDetail["comments"];
+  topics: SubjectDetail["topics"];
+  notes: string[];
+}> {
+  const notes: string[] = [];
+  const [comments, topics] = await Promise.all([
+    fetchSubjectComments(env, subjectId).catch((error) => {
+      notes.push(note("commentsHtml", error));
+      return [];
+    }),
+    fetchSubjectTopics(env, subjectId).catch((error) => {
+      notes.push(note("topicsHtml", error));
+      return [];
+    }),
+  ]);
+  return { comments, topics, notes };
 }
 
 async function getSubjectEpisodes(
@@ -293,48 +344,38 @@ async function getSubjectStaff(
 
 async function getSubjectComments(
   subjectId: number,
-  url: URL,
   env: Env,
 ): Promise<Response> {
-  const force = boolParam(url.searchParams.get("force"));
-  const result = await getOrSetJson(
-    env,
-    cacheKey(["subjects", subjectId, "comments"]),
-    { ttlSeconds: 30 * 60, force },
-    () => fetchSubjectComments(env, subjectId),
-  );
-  return json({
-    data: result.value,
-    source: {
-      provider: "bangumi-web",
-      available: result.value.length > 0,
-      note: "Bangumi official v0 API does not expose subject comments; this endpoint parses public HTML best-effort.",
+  const comments = await fetchSubjectComments(env, subjectId);
+  return json(
+    {
+      data: comments,
+      source: {
+        provider: "bangumi-web",
+        available: comments.length > 0,
+        note: "Bangumi official v0 API does not expose subject comments; this endpoint parses public HTML best-effort.",
+      },
     },
-    cache: result.cache,
-  });
+    { headers: { "cache-control": "no-store" } },
+  );
 }
 
 async function getSubjectTopics(
   subjectId: number,
-  url: URL,
   env: Env,
 ): Promise<Response> {
-  const force = boolParam(url.searchParams.get("force"));
-  const result = await getOrSetJson(
-    env,
-    cacheKey(["subjects", subjectId, "topics"]),
-    { ttlSeconds: 30 * 60, force },
-    () => fetchSubjectTopics(env, subjectId),
-  );
-  return json({
-    data: result.value,
-    source: {
-      provider: "bangumi-web",
-      available: result.value.length > 0,
-      note: "Bangumi official v0 API does not expose subject board topics; this endpoint parses public HTML best-effort.",
+  const topics = await fetchSubjectTopics(env, subjectId);
+  return json(
+    {
+      data: topics,
+      source: {
+        provider: "bangumi-web",
+        available: topics.length > 0,
+        note: "Bangumi official v0 API does not expose subject board topics; this endpoint parses public HTML best-effort.",
+      },
     },
-    cache: result.cache,
-  });
+    { headers: { "cache-control": "no-store" } },
+  );
 }
 
 async function getEpisode(
@@ -355,25 +396,20 @@ async function getEpisode(
 
 async function getEpisodeComments(
   episodeId: number,
-  url: URL,
   env: Env,
 ): Promise<Response> {
-  const force = boolParam(url.searchParams.get("force"));
-  const result = await getOrSetJson(
-    env,
-    cacheKey(["episodes", episodeId, "comments"]),
-    { ttlSeconds: 30 * 60, force },
-    () => fetchEpisodeComments(env, episodeId),
-  );
-  return json({
-    data: result.value,
-    source: {
-      provider: "bangumi-web",
-      available: result.value.length > 0,
-      note: "Bangumi official v0 API does not expose episode comments; this endpoint parses public HTML best-effort.",
+  const comments = await fetchEpisodeComments(env, episodeId);
+  return json(
+    {
+      data: comments,
+      source: {
+        provider: "bangumi-web",
+        available: comments.length > 0,
+        note: "Bangumi official v0 API does not expose episode comments; this endpoint parses public HTML best-effort.",
+      },
     },
-    cache: result.cache,
-  });
+    { headers: { "cache-control": "no-store" } },
+  );
 }
 
 async function getSchedule(url: URL, env: Env): Promise<Response> {
