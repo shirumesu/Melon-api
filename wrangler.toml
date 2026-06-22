@@ -7,7 +7,7 @@ workers_dev = false
 BANGUMI_API_BASE = "https://api.bgm.tv"
 BANGUMI_WEB_BASE = "https://bangumi.tv"
 BANGUMI_DATA_SOURCE = "https://cdn.jsdelivr.net/npm/bangumi-data@0.3/dist/data.json"
-BANGUMI_USER_AGENT = "melon-api/0.1 (https://github.com/konakona/melon-api)"
+BANGUMI_USER_AGENT = "melon-api"
 PUBLIC_BASE_URL = "https://melonapi.konataizumi.com"
 
 [[r2_buckets]]

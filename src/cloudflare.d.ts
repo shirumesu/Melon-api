@@ -10,7 +10,7 @@ interface R2Bucket {
     options?: {
       httpMetadata?: { contentType?: string };
       customMetadata?: Record<string, string>;
-    }
+    },
   ): Promise<void>;
 }
 
