@@ -6,7 +6,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.1",
+      version: "0.1.2",
       description: [
         "Melon API 是给 melonbang 追番客户端使用的 Bangumi-first 动画信息聚合 API。",
         "优先使用 Bangumi v0 API 获取 subject、章节、角色、制作人员等结构化数据；Bangumi 官方 API 暂未覆盖的吐槽箱、讨论版、单集评论会从公开网页 HTML 做 best-effort 解析。",
