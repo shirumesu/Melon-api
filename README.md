@@ -82,6 +82,7 @@ wrangler r2 bucket create melon-api-cache
 ### 3. 配置环境变量（Secrets）
 
 Access_token 在[这里](https://next.bgm.tv/demo/access-token)获取  
+ADMIN_TOKEN 请随意填写任意值  
 
 ```bash
 wrangler secret put BANGUMI_ACCESS_TOKEN
