@@ -15,6 +15,7 @@ import {
   errorJson,
   json,
   parseSeason,
+  preflightResponse,
   readListParam,
   requireAdmin,
   seasonDateRange
@@ -22,7 +23,7 @@ import {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (request.method === "OPTIONS") return json({}, { status: 204 });
+    if (request.method === "OPTIONS") return preflightResponse();
     try {
       return await route(request, env, ctx);
     } catch (error) {
@@ -43,6 +44,10 @@ export default {
 async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const path = trimPath(url.pathname);
+  if (request.method === "GET" && boolParam(url.searchParams.get("force"))) {
+    const rejected = requireAdmin(request, env);
+    if (rejected) return rejected;
+  }
 
   if (path === "") return json({ name: "melon-api", docs: "/docs", openapi: "/openapi.json" });
   if (path === "health") return json({ ok: true, now: new Date().toISOString() });
@@ -291,7 +296,20 @@ async function getSeason(url: URL, env: Env, mode: "current" | "trending"): Prom
 
   const client = new BangumiClient(env);
   const force = boolParam(url.searchParams.get("force"));
-  const key = cacheKey([mode, season.code, input.limit, input.offset, input.tags.join(","), input.sort]);
+  const key = cacheKey([
+    mode,
+    season.code,
+    input.q,
+    input.sort,
+    input.limit,
+    input.offset,
+    input.tags.join(","),
+    input.metaTags.join(","),
+    input.airDates.join(","),
+    input.ratings.join(","),
+    input.ranks.join(","),
+    input.includeNsfw
+  ]);
   const result = await getOrSetJson(env, key, { ttlSeconds: 12 * 60 * 60, force }, () => client.searchSubjects(input));
   return json({
     season,

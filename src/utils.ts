@@ -4,10 +4,14 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json; charset=utf-8");
   headers.set("cache-control", headers.get("cache-control") ?? "public, max-age=60");
-  headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
-  headers.set("access-control-allow-headers", "authorization, content-type");
+  applyCorsHeaders(headers);
   return new Response(JSON.stringify(data, null, 2), { ...init, headers });
+}
+
+export function preflightResponse(): Response {
+  const headers = new Headers({ "cache-control": "public, max-age=600" });
+  applyCorsHeaders(headers);
+  return new Response(null, { status: 204, headers });
 }
 
 export function errorJson(status: number, code: string, message: string, details?: unknown): Response {
@@ -40,10 +44,30 @@ export function readListParam(url: URL, name: string): string[] {
 }
 
 export function requireAdmin(request: Request, env: Env): Response | null {
-  if (!env.ADMIN_TOKEN) return null;
+  if (!env.ADMIN_TOKEN) {
+    return errorJson(503, "ADMIN_TOKEN_NOT_CONFIGURED", "ADMIN_TOKEN must be configured for admin operations.");
+  }
   const header = request.headers.get("authorization");
-  if (header === `Bearer ${env.ADMIN_TOKEN}`) return null;
+  const prefix = "Bearer ";
+  if (header?.startsWith(prefix) && constantTimeEqual(header.slice(prefix.length), env.ADMIN_TOKEN)) {
+    return null;
+  }
   return errorJson(401, "UNAUTHORIZED", "Missing or invalid admin token.");
+}
+
+function applyCorsHeaders(headers: Headers): void {
+  headers.set("access-control-allow-origin", "*");
+  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
+  headers.set("access-control-allow-headers", "authorization, content-type");
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  let diff = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    diff |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+  }
+  return diff === 0;
 }
 
 export function baseApi(env: Env): string {

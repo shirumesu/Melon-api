@@ -16,10 +16,17 @@ bucket_name = "melon-api-cache"
 # Optional. Create with:
 # wrangler d1 create melon-api-index
 # Then fill database_id.
+#
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "melon-api-index"
 # database_id = ""
+
+# Logging:
+#
+# [observability]
+# enabled = true
+# head_sampling_rate = 1
 
 [triggers]
 crons = ["0 0 * * *"]

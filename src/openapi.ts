@@ -71,7 +71,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             queryParam("limit", "integer", "每页数量，最大 100。", { default: 20, maximum: 100, minimum: 1 }),
             queryParam("offset", "integer", "分页偏移。", { default: 0, minimum: 0 }),
             queryParam("includeNsfw", "boolean", "是否允许 NSFW 结果。默认 false。", { default: false }),
-            queryParam("force", "boolean", "是否绕过 R2 缓存重新请求 Bangumi。调试时使用，客户端正常不要传。", { default: false })
+            forceQueryParam("是否绕过 R2 缓存重新请求 Bangumi。调试时使用，客户端正常不要传。")
           ],
           responses: {
             "200": response("分页番剧列表", allOf([schemaRef("PagedSubjectList"), objectSchema({ cache: cacheSchema })])),
@@ -88,7 +88,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "full=false 时只返回简略 SubjectListItem，适合列表补全或低成本探测。",
             "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。"
           ].join("\n\n"),
-          parameters: [pathId("subjectId", "Bangumi subject ID。"), queryParam("full", "boolean", "是否返回聚合详情。默认 true。", { default: true }), queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })],
+          parameters: [pathId("subjectId", "Bangumi subject ID。"), queryParam("full", "boolean", "是否返回聚合详情。默认 true。", { default: true }), forceQueryParam()],
           responses: {
             "200": response("番剧详情", objectSchema({ data: { oneOf: [schemaRef("SubjectDetail"), schemaRef("SubjectListItem")] }, cache: cacheSchema }, ["data", "cache"])),
             "404": errorResponse,
@@ -106,7 +106,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           tags: ["章节"],
           summary: "获取单集详情",
           description: "通过 Bangumi episodeId 获取章节名、中文名、播出日期、时长、简介、评论数和 Bangumi URL。",
-          parameters: [pathId("episodeId", "Bangumi episode ID。"), queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })],
+          parameters: [pathId("episodeId", "Bangumi episode ID。"), forceQueryParam()],
           responses: {
             "200": response("单集详情", objectSchema({ data: schemaRef("Episode"), cache: cacheSchema }, ["data", "cache"])),
             "404": errorResponse,
@@ -122,7 +122,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "从 Bangumi 单集页面 HTML 解析公开评论。官方 v0 API 暂不提供 episode comments。",
             "如果 Bangumi 页面结构变化、评论需要登录、或被访问限制，data 可能为空；此时 source.available=false。"
           ].join("\n\n"),
-          parameters: [pathId("episodeId", "Bangumi episode ID。"), queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })],
+          parameters: [pathId("episodeId", "Bangumi episode ID。"), forceQueryParam()],
           responses: {
             "200": response("单集评论列表", htmlListResponse("EpisodeComment")),
             "500": errorResponse
@@ -142,7 +142,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             queryParam("date", "string", "中心日期，格式 YYYY-MM-DD。默认上海时区今天。", { format: "date", example: "2026-06-22" }),
             queryParam("days", "integer", "前后窗口天数。0 表示只看 date 当天，最大 31。", { default: 7, minimum: 0, maximum: 31 }),
             queryParam("requireBroadcast", "boolean", "是否只返回有明确 broadcast 规则的条目。默认 false，会允许 begin 周更兜底。", { default: false }),
-            queryParam("force", "boolean", "是否绕过 R2 缓存重新生成。", { default: false })
+            forceQueryParam("是否绕过 R2 缓存重新生成。")
           ],
           responses: {
             "200": response("播出时间表", allOf([schemaRef("ScheduleResponse"), objectSchema({ cache: cacheSchema })])),
@@ -155,7 +155,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           tags: ["时间表"],
           summary: "获取今日更新",
           description: "读取 /v1/schedule/latest 的缓存结果，并按上海时区今天过滤 byDate。适合首页“今日更新”模块。",
-          parameters: [queryParam("date", "string", "用于生成缓存窗口的中心日期；一般不需要传。", { format: "date" }), queryParam("days", "integer", "用于生成缓存窗口的前后天数；默认 7。", { default: 7, minimum: 0, maximum: 31 }), queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })],
+          parameters: [queryParam("date", "string", "用于生成缓存窗口的中心日期；一般不需要传。", { format: "date" }), queryParam("days", "integer", "用于生成缓存窗口的前后天数；默认 7。", { default: 7, minimum: 0, maximum: 31 }), forceQueryParam()],
           responses: {
             "200": response("今日更新", objectSchema({ generatedAt: { type: "string", format: "date-time" }, date: { type: "string", format: "date" }, items: arrayOf("ScheduleOccurrence"), cache: cacheSchema }, ["generatedAt", "date", "items", "cache"])),
             "500": errorResponse
@@ -297,7 +297,7 @@ function listChildEndpoint(summary: string, description: string, itemSchema: str
       tags: ["番剧"],
       summary,
       description,
-      parameters: [pathId("subjectId", "Bangumi subject ID。"), queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })],
+      parameters: [pathId("subjectId", "Bangumi subject ID。"), forceQueryParam()],
       responses: {
         "200": response(summary, objectSchema({ data: arrayOf(itemSchema), cache: schemaRef("CacheMeta") }, ["data", "cache"])),
         "404": response("未找到", schemaRef("ApiError")),
@@ -313,7 +313,7 @@ function htmlListEndpoint(summary: string, description: string, itemSchema: stri
       tags: ["番剧"],
       summary,
       description,
-      parameters: [pathId("subjectId", "Bangumi subject ID。"), queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })],
+      parameters: [pathId("subjectId", "Bangumi subject ID。"), forceQueryParam()],
       responses: {
         "200": response(summary, htmlListResponse(itemSchema)),
         "500": response("错误响应", schemaRef("ApiError"))
@@ -336,7 +336,7 @@ function seasonEndpoint(summary: string, description: string, defaultSort: "rank
         queryParam("limit", "integer", "返回数量。", { default: defaultSort === "heat" ? 12 : 36, minimum: 1, maximum: 100 }),
         queryParam("offset", "integer", "分页偏移。", { default: 0, minimum: 0 }),
         queryParam("includeNsfw", "boolean", "是否允许 NSFW 结果。默认 false。", { default: false }),
-        queryParam("force", "boolean", "是否绕过 R2 缓存。", { default: false })
+        forceQueryParam()
       ],
       responses: {
         "200": response(summary, allOf([objectSchema({ season: schemaRef("SeasonInfo"), range: objectSchema({ start: { type: "string", format: "date" }, end: { type: "string", format: "date" } }, ["start", "end"]), cache: schemaRef("CacheMeta") }, ["season", "range", "cache"]), schemaRef("PagedSubjectList")])),
@@ -360,6 +360,10 @@ function pathId(name: string, description: string): unknown {
 
 function queryParam(name: string, type: string, description: string, extra: Record<string, unknown> = {}): unknown {
   return { name, in: "query", description, schema: { type, ...extra } };
+}
+
+function forceQueryParam(description = "是否绕过 R2 缓存。"): unknown {
+  return queryParam("force", "boolean", `${description} 需要 Authorization: Bearer <ADMIN_TOKEN>。`, { default: false });
 }
 
 function arrayQueryParam(name: string, description: string, example: string[]): unknown {
