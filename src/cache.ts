@@ -8,6 +8,8 @@ type CacheEnvelope<T> = {
 
 const memoryCache = new Map<string, CacheEnvelope<unknown>>();
 const MAX_MEMORY_CACHE_ENTRIES = 256;
+const MAX_DELETE_BATCH_SIZE = 1000;
+const DEFAULT_STALE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 
 export async function getOrSetJson<T>(
   env: Env,
@@ -16,27 +18,57 @@ export async function getOrSetJson<T>(
   loader: () => Promise<T>,
 ): Promise<{
   value: T;
-  cache: { key: string; hit: boolean; cachedAt: string; expiresAt: string };
+  cache: {
+    key: string;
+    hit: boolean;
+    cachedAt: string;
+    expiresAt: string;
+    stale?: boolean;
+  };
 }> {
+  let stale: CacheEnvelope<T> | null = null;
   if (!policy.force) {
-    const cached = await readJson<T>(env, key).catch((error) => {
-      console.warn(`Cache read failed for ${key}`, error);
-      return null;
-    });
-    if (cached && Date.parse(cached.expiresAt) > Date.now()) {
-      return {
-        value: cached.value,
-        cache: {
-          key,
-          hit: true,
-          cachedAt: cached.cachedAt,
-          expiresAt: cached.expiresAt,
-        },
-      };
+    const cached = await readJson<T>(env, key, { allowExpired: true }).catch(
+      (error) => {
+        console.warn(`Cache read failed for ${key}`, error);
+        return null;
+      },
+    );
+    if (cached) {
+      if (Date.parse(cached.expiresAt) > Date.now()) {
+        return {
+          value: cached.value,
+          cache: {
+            key,
+            hit: true,
+            cachedAt: cached.cachedAt,
+            expiresAt: cached.expiresAt,
+          },
+        };
+      }
+      stale = cached;
     }
   }
 
-  const value = await loader();
+  let value: T;
+  try {
+    value = await loader();
+  } catch (error) {
+    if (stale) {
+      console.warn(`Loader failed for ${key}; returning stale cache`, error);
+      return {
+        value: stale.value,
+        cache: {
+          key,
+          hit: true,
+          stale: true,
+          cachedAt: stale.cachedAt,
+          expiresAt: stale.expiresAt,
+        },
+      };
+    }
+    throw error;
+  }
   const now = new Date();
   const envelope: CacheEnvelope<T> = {
     value,
@@ -60,10 +92,11 @@ export async function getOrSetJson<T>(
 export async function readJson<T>(
   env: Env,
   key: string,
+  options: { allowExpired?: boolean } = {},
 ): Promise<CacheEnvelope<T> | null> {
   const memory = memoryCache.get(key) as CacheEnvelope<T> | undefined;
   if (memory) {
-    if (Date.parse(memory.expiresAt) > Date.now()) {
+    if (options.allowExpired || Date.parse(memory.expiresAt) > Date.now()) {
       memoryCache.delete(key);
       memoryCache.set(key, memory);
       return memory;
@@ -74,7 +107,11 @@ export async function readJson<T>(
   if (!env.CACHE_BUCKET) return null;
   const object = await env.CACHE_BUCKET.get(key);
   if (!object) return null;
-  return (await object.json()) as CacheEnvelope<T>;
+  const envelope = (await object.json()) as CacheEnvelope<T>;
+  if (!options.allowExpired && Date.parse(envelope.expiresAt) <= Date.now()) {
+    return null;
+  }
+  return envelope;
 }
 
 export async function writeJson<T>(
@@ -116,4 +153,59 @@ export function cacheKey(
     .filter((part) => part !== undefined && part !== null && part !== "")
     .map((part) => encodeURIComponent(String(part)))
     .join("/");
+}
+
+export async function cleanupExpiredCacheObjects(
+  env: Env,
+  options: { maxDeletes?: number; staleRetentionSeconds?: number } = {},
+): Promise<{
+  scanned: number;
+  deleted: number;
+  truncated: boolean;
+}> {
+  if (!env.CACHE_BUCKET) return { scanned: 0, deleted: 0, truncated: false };
+
+  const maxDeletes = options.maxDeletes ?? MAX_DELETE_BATCH_SIZE;
+  const staleRetentionMs =
+    (options.staleRetentionSeconds ?? DEFAULT_STALE_RETENTION_SECONDS) * 1000;
+  let cursor: string | undefined;
+  let scanned = 0;
+  let deleted = 0;
+  let truncated = false;
+
+  do {
+    const listed = await env.CACHE_BUCKET.list({
+      cursor,
+      include: ["customMetadata"],
+      limit: MAX_DELETE_BATCH_SIZE,
+    });
+    scanned += listed.objects.length;
+
+    const expiredKeys = listed.objects
+      .filter((object) =>
+        isPastStaleRetention(object.customMetadata?.expiresAt, staleRetentionMs),
+      )
+      .map((object) => object.key)
+      .slice(0, maxDeletes - deleted);
+
+    if (expiredKeys.length > 0) {
+      await env.CACHE_BUCKET.delete(expiredKeys);
+      deleted += expiredKeys.length;
+      for (const key of expiredKeys) memoryCache.delete(key);
+    }
+
+    truncated = listed.truncated;
+    cursor = listed.cursor;
+  } while (truncated && deleted < maxDeletes);
+
+  return { scanned, deleted, truncated };
+}
+
+function isPastStaleRetention(
+  expiresAt: string | undefined,
+  staleRetentionMs: number,
+): boolean {
+  return (
+    expiresAt != null && Date.parse(expiresAt) + staleRetentionMs <= Date.now()
+  );
 }

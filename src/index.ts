@@ -1,5 +1,5 @@
 import { BangumiClient, type SearchInput } from "./bangumi";
-import { cacheKey, getOrSetJson } from "./cache";
+import { cacheKey, cleanupExpiredCacheObjects, getOrSetJson } from "./cache";
 import {
   fetchEpisodeComments,
   fetchSubjectComments,
@@ -456,6 +456,10 @@ async function refreshMaterializedCaches(env: Env): Promise<void> {
     getScheduleCached(origin, env, true),
     getSeason(seasonUrl, env, "current"),
     getSeason(seasonUrl, env, "trending"),
+    cleanupExpiredCacheObjects(env).catch((error) => {
+      console.warn("Expired cache cleanup failed", error);
+      return { scanned: 0, deleted: 0, truncated: false };
+    }),
   ]);
 }
 

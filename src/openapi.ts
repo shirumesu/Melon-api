@@ -501,6 +501,11 @@ function schemas(): Record<string, unknown> {
     CacheMeta: objectSchema({
       key: { type: "string", description: "R2 缓存 key。" },
       hit: { type: "boolean", description: "是否命中缓存。" },
+      stale: {
+        type: "boolean",
+        description:
+          "是否返回了已过期的旧缓存。仅在外部数据源刷新失败且存在旧缓存时出现。",
+      },
       cachedAt: { type: "string", format: "date-time" },
       expiresAt: { type: "string", format: "date-time" },
     }),
