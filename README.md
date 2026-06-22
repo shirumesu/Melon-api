@@ -11,21 +11,15 @@
 
 本服务提供以下番剧相关 API：
 
----
-
 ### 健康检查
 
 * **GET** `/health`
   接口健康状态检查
 
----
-
 ### 番剧搜索
 
 * **GET** `/v1/subjects/search?q={name}`
   根据关键词搜索番剧
-
----
 
 ### 热门与新番
 
@@ -35,8 +29,6 @@
 * **GET** `/v1/seasons/current`
   本季新番列表
 
----
-
 ### 放送时间表
 
 * **GET** `/v1/schedule/today`
@@ -44,8 +36,6 @@
 
 * **GET** `/v1/schedule/latest?days=7`
   最近 7 天放送时间表
-
----
 
 ### 番剧详情
 
@@ -59,8 +49,6 @@
 GET /v1/subjects/531063
 ```
 
----
-
 ### 单集信息
 
 * **GET** `/v1/episodes/{id}/comments`
@@ -72,8 +60,6 @@ GET /v1/subjects/531063
 GET /v1/episodes/1656040/comments
 ```
 
----
-
 ## 如何部署
 
 ### 1. 安装 Wrangler 并登录
@@ -83,15 +69,11 @@ npm i -g wrangler
 wrangler login
 ```
 
----
-
 ### 2. 创建 R2 存储桶
 
 ```bash
 wrangler r2 bucket create melon-api-cache
 ```
-
----
 
 ### 3. 配置环境变量（Secrets）
 
@@ -99,8 +81,6 @@ wrangler r2 bucket create melon-api-cache
 wrangler secret put BANGUMI_ACCESS_TOKEN
 wrangler secret put ADMIN_TOKEN
 ```
-
----
 
 ### 4. 部署项目
 
@@ -114,8 +94,6 @@ pnpm deploy
 ```bash
 wrangler deploy
 ```
-
----
 
 ### 5.（可选）本地开发测试
 
