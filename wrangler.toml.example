@@ -1,14 +1,13 @@
 name = "melon-api"
 main = "src/index.ts"
 compatibility_date = "2026-06-22"
-workers_dev = false
+workers_dev = true
 
 [vars]
 BANGUMI_API_BASE = "https://api.bgm.tv"
 BANGUMI_WEB_BASE = "https://bangumi.tv"
 BANGUMI_DATA_SOURCE = "https://cdn.jsdelivr.net/npm/bangumi-data@0.3/dist/data.json"
-BANGUMI_USER_AGENT = "melon-api/0.1 (https://github.com/konakona/melon-api)"
-PUBLIC_BASE_URL = "https://melonapi.konataizumi.com"
+BANGUMI_USER_AGENT = "melon-api"
 
 [[r2_buckets]]
 binding = "CACHE_BUCKET"
@@ -21,10 +20,6 @@ bucket_name = "melon-api-cache"
 # binding = "DB"
 # database_name = "melon-api-index"
 # database_id = ""
-
-[[routes]]
-pattern = "melonapi.konataizumi.com"
-custom_domain = true
 
 [triggers]
 crons = ["0 0 * * *"]

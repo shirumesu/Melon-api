@@ -81,12 +81,23 @@ wrangler r2 bucket create melon-api-cache
 
 ### 3. 配置环境变量（Secrets）
 
+1. 将 *.dev.vars.example* 修改为 *.dev.vars* 并填入信息  
 Access_token 在[这里](https://next.bgm.tv/demo/access-token)获取  
 ADMIN_TOKEN 请随意填写任意值  
 
 ```bash
 wrangler secret put BANGUMI_ACCESS_TOKEN
 wrangler secret put ADMIN_TOKEN
+```
+
+2. 将 *wrangler.toml.example* 修改为 *wrangler.toml*  
+一般而言不需要修改，如果你想可以改一下 `BANGUMI_USER_AGENT`、`r2_buckets.bucket_name`  
+如果你有自定义域名，可以新增一块：
+
+```text
+[[routes]]
+pattern = "your-weburl"
+custom_domain = true
 ```
 
 ### 4. 部署项目

@@ -7,6 +7,7 @@ export type Env = {
   BANGUMI_WEB_BASE?: string;
   BANGUMI_DATA_SOURCE?: string;
   BANGUMI_USER_AGENT?: string;
+  PUBLIC_BASE_URL?: string;
 };
 
 export type CachePolicy = {

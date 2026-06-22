@@ -51,7 +51,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=3600" }
     });
   }
-  if (path === "openapi.json") return json(openApiSpec(url.origin), { headers: { "cache-control": "public, max-age=3600" } });
+  if (path === "openapi.json") return json(openApiSpec(env.PUBLIC_BASE_URL ?? url.origin), { headers: { "cache-control": "public, max-age=3600" } });
 
   if (request.method === "GET" && path === "v1/subjects/search") return searchSubjects(url, env);
   if (request.method === "GET" && /^v1\/subjects\/\d+$/.test(path)) {
