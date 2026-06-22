@@ -62,6 +62,7 @@ export type SubjectListItem = {
   season?: SeasonInfo;
   platform?: string;
   episodeTotal?: number;
+  nsfw?: boolean;
   score?: number;
   rank?: number;
   tags: SubjectTag[];
@@ -197,6 +198,18 @@ export type ScheduleOccurrence = {
   type: string;
   coverUrl?: string;
   episodeTotal?: number;
+  tags: SubjectTag[];
+  metaTags: string[];
+  nsfw?: boolean;
+  nsfwStatus: "safe" | "nsfw" | "unknown";
+  hasSubjectId: boolean;
+  detailAvailable: boolean;
+  needsFallback: {
+    cover: boolean;
+    episodeTotal: boolean;
+    nsfw: boolean;
+  };
+  url?: string;
   sites: Array<{
     site: string;
     id?: string | number | null;

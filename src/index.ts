@@ -280,7 +280,7 @@ async function getTodaySchedule(url: URL, env: Env): Promise<Response> {
 async function getSeason(url: URL, env: Env, mode: "current" | "trending"): Promise<Response> {
   const season = parseSeason(url.searchParams.get("season"));
   const range = seasonDateRange(season);
-  const limit = clampInt(url.searchParams.get("limit"), mode === "trending" ? 12 : 36, 1, 100);
+  const limit = clampInt(url.searchParams.get("limit"), 100, 1, 100);
   const input: SearchInput = {
     q: url.searchParams.get("q") ?? "",
     limit,
@@ -337,9 +337,15 @@ async function getScheduleCached(
   const days = clampInt(url.searchParams.get("days"), 7, 0, 31);
   const date = url.searchParams.get("date") ?? currentShanghaiDate();
   const requireBroadcast = boolParam(url.searchParams.get("requireBroadcast"));
+  const includeNsfw = boolParam(url.searchParams.get("includeNsfw"));
+  const includeUnknownNsfw = !["0", "false", "no"].includes(url.searchParams.get("includeUnknownNsfw") ?? "");
   const force = forceOverride || boolParam(url.searchParams.get("force"));
-  return getOrSetJson(env, cacheKey(["schedule", date, days, requireBroadcast]), { ttlSeconds: 24 * 60 * 60, force }, () =>
-    buildScheduleResponse(env, { days, date, requireBroadcast })
+  const keyParts =
+    includeNsfw || !includeUnknownNsfw
+      ? ["schedule", date, days, requireBroadcast, "nsfw", includeNsfw, includeUnknownNsfw]
+      : ["schedule", date, days, requireBroadcast];
+  return getOrSetJson(env, cacheKey(keyParts), { ttlSeconds: 24 * 60 * 60, force }, () =>
+    buildScheduleResponse(env, { days, date, requireBroadcast, includeNsfw, includeUnknownNsfw })
   );
 }
 

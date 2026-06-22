@@ -38,6 +38,7 @@ type BangumiSubject = {
   name: string;
   name_cn?: string;
   summary?: string;
+  nsfw?: boolean;
   short_summary?: string;
   date?: string;
   platform?: string;
@@ -256,6 +257,17 @@ export class BangumiClient {
     return this.fetchJson<CalendarResponse>("/calendar", { auth: false });
   }
 
+  async getCalendarSubjects(): Promise<SubjectListItem[]> {
+    const calendar = await this.getCalendar();
+    const bySubjectId = new Map<number, SubjectListItem>();
+    for (const day of calendar) {
+      for (const subject of day.items) {
+        bySubjectId.set(subject.id, this.mapSubjectListItem(subject));
+      }
+    }
+    return [...bySubjectId.values()];
+  }
+
   mapSubjectDetail(
     subject: BangumiSubject,
     parts: {
@@ -319,6 +331,7 @@ export class BangumiClient {
       season: seasonFromDate(subject.date),
       platform: subject.platform || undefined,
       episodeTotal: positiveNumber(subject.total_episodes ?? subject.eps),
+      nsfw: subject.nsfw,
       score: positiveNumber(subject.rating?.score),
       rank: positiveNumber(subject.rating?.rank),
       tags,

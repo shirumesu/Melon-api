@@ -1,9 +1,10 @@
-import { subjectIdFromSites } from "./bangumi";
-import type { Env, ScheduleOccurrence, ScheduleResponse, SubjectSchedule } from "./types";
+import { BangumiClient, subjectIdFromSites } from "./bangumi";
+import type { Env, ScheduleOccurrence, ScheduleResponse, SubjectListItem, SubjectSchedule } from "./types";
 import {
   currentShanghaiDate,
   formatInShanghai,
   seasonFromDate,
+  seasonDateRange,
   shanghaiDateString,
   weekdayInShanghai
 } from "./utils";
@@ -32,14 +33,21 @@ type BangumiDataItem = {
 
 export async function buildScheduleResponse(
   env: Env,
-  input: { days: number; date?: string; requireBroadcast?: boolean }
+  input: { days: number; date?: string; requireBroadcast?: boolean; includeNsfw?: boolean; includeUnknownNsfw?: boolean }
 ): Promise<ScheduleResponse> {
   const centerDate = input.date ?? currentShanghaiDate();
   const windowStart = shanghaiDayStartUtc(addDaysToDateString(centerDate, -input.days));
   const windowEnd = shanghaiDayStartUtc(addDaysToDateString(centerDate, input.days + 1));
   const data = await loadBangumiData(env);
+  const enrichment = await loadScheduleEnrichment(env, windowStart, windowEnd).catch((error) => {
+    console.warn("schedule enrichment unavailable", error);
+    return new Map<number, SubjectListItem>();
+  });
   const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
-    requireBroadcast: input.requireBroadcast ?? false
+    requireBroadcast: input.requireBroadcast ?? false,
+    includeNsfw: input.includeNsfw ?? false,
+    includeUnknownNsfw: input.includeUnknownNsfw ?? true,
+    enrichment
   });
   const byDate: Record<string, ScheduleOccurrence[]> = {};
   for (const item of items) {
@@ -90,6 +98,44 @@ export async function loadBangumiData(env: Env): Promise<BangumiData> {
   throw new Error(`Failed to fetch bangumi-data from all sources: ${errors.join("; ")}`);
 }
 
+async function loadScheduleEnrichment(env: Env, start: Date, end: Date): Promise<Map<number, SubjectListItem>> {
+  const client = new BangumiClient(env);
+  const bySubjectId = new Map<number, SubjectListItem>();
+
+  const calendarSubjects = await client.getCalendarSubjects().catch((error) => {
+    console.warn("Bangumi calendar enrichment unavailable", error);
+    return [];
+  });
+  for (const subject of calendarSubjects) bySubjectId.set(subject.subjectId, subject);
+
+  const seasons = seasonsInWindow(start, end);
+  await Promise.all(
+    seasons.map(async (season) => {
+      const range = seasonDateRange(season);
+      const page = await client
+        .searchSubjects({
+          q: "",
+          limit: 100,
+          offset: 0,
+          sort: "rank",
+          tags: [],
+          metaTags: [],
+          airDates: [`>=${range.start}`, `<=${range.end}`],
+          ratings: [],
+          ranks: [],
+          includeNsfw: true
+        })
+        .catch((error) => {
+          console.warn(`Bangumi season enrichment unavailable for ${season.code}`, error);
+          return null;
+        });
+      for (const subject of page?.data ?? []) bySubjectId.set(subject.subjectId, subject);
+    })
+  );
+
+  return bySubjectId;
+}
+
 export function scheduleForSubject(items: ScheduleOccurrence[], subjectId: number): SubjectSchedule | undefined {
   const occurrences = items.filter((item) => item.subjectId === subjectId);
   const first = occurrences[0];
@@ -130,7 +176,12 @@ function buildSchedule(
   items: BangumiDataItem[],
   start: Date,
   end: Date,
-  options: { requireBroadcast: boolean }
+  options: {
+    requireBroadcast: boolean;
+    includeNsfw: boolean;
+    includeUnknownNsfw: boolean;
+    enrichment: Map<number, SubjectListItem>;
+  }
 ): ScheduleOccurrence[] {
   const schedule: ScheduleOccurrence[] = [];
   for (const item of items) {
@@ -143,6 +194,10 @@ function buildSchedule(
     const names = pickNames(item);
     const sites = pickSites(item.sites ?? []);
     const subjectId = subjectIdFromSites(sites);
+    const enriched = subjectId ? options.enrichment.get(subjectId) : undefined;
+    const nsfwStatus = enriched?.nsfw === true ? "nsfw" : enriched?.nsfw === false ? "safe" : "unknown";
+    if (!options.includeNsfw && enriched?.nsfw === true) continue;
+    if (!options.includeUnknownNsfw && enriched?.nsfw == null) continue;
 
     for (const occurrence of occurrences) {
       schedule.push({
@@ -151,9 +206,23 @@ function buildSchedule(
         weekday: weekdayInShanghai(occurrence),
         subjectId,
         name: names.native,
-        nameCn: names.zhHans,
-        displayName: names.display,
-        type: item.type ?? "tv",
+        nameCn: enriched?.nameCn ?? names.zhHans,
+        displayName: enriched?.displayName ?? names.display,
+        type: item.type ?? enriched?.platform ?? "tv",
+        coverUrl: enriched?.coverUrl,
+        episodeTotal: enriched?.episodeTotal,
+        tags: enriched?.tags ?? [],
+        metaTags: enriched?.metaTags ?? [],
+        nsfw: enriched?.nsfw,
+        nsfwStatus,
+        hasSubjectId: subjectId != null,
+        detailAvailable: subjectId != null,
+        needsFallback: {
+          cover: !enriched?.coverUrl,
+          episodeTotal: !enriched?.episodeTotal,
+          nsfw: enriched?.nsfw == null
+        },
+        url: enriched?.url,
         sites,
         source: {
           ruleKind: item.broadcast ? "broadcast" : "begin-weekly-fallback",
@@ -262,6 +331,15 @@ function addUtcMonths(date: Date, amount: number): Date {
   const next = new Date(date);
   next.setUTCMonth(next.getUTCMonth() + amount);
   return next;
+}
+
+function seasonsInWindow(start: Date, end: Date): NonNullable<ReturnType<typeof seasonFromDate>>[] {
+  const byCode = new Map<string, NonNullable<ReturnType<typeof seasonFromDate>>>();
+  for (let time = start.getTime(); time < end.getTime(); time += MS_DAY) {
+    const season = seasonFromDate(shanghaiDateString(new Date(time)));
+    if (season) byCode.set(season.code, season);
+  }
+  return [...byCode.values()];
 }
 
 function unique(values: string[]): string[] {
