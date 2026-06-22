@@ -27,7 +27,7 @@
 
 ### 热门与新番
 
-* **GET** `/v1/trending/current` 
+* **GET** `/v1/trending/current`  
   本季热门番剧
 
 * **GET** `/v1/seasons/current`  
