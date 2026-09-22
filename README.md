@@ -53,6 +53,12 @@
 GET /v1/subjects/531063
 ```
 
+客户端只需要番剧资料时，使用 `GET /v1/subjects/531063?includeHtml=false`。
+它复用完整详情缓存，保留章节、角色与声优、制作人员、简介、评分、关联条目和播出时间，
+不等待评论与讨论网页抓取；`comments` 和 `topics` 返回空数组。
+需要评论时再请求 `/v1/subjects/{id}/comments` 或 `/v1/subjects/{id}/topics`。
+不传该参数的默认行为不变；`full=false` 仍返回简略条目。
+
 ### 单集信息
 
 * **GET** `/v1/episodes/{id}/comments`  
@@ -65,6 +71,11 @@ GET /v1/episodes/1656040/comments
 ```
 
 ## 如何部署
+
+本地开发使用 Node.js 22.15 或以上版本。安装依赖后运行 `pnpm test`，
+它会先检查 TypeScript 类型，再用 Node 内置测试运行器验证详情路由、
+缓存命中时跳过 HTML、默认评论兼容性及并行加载。测试使用模拟上游响应，
+不需要 Cloudflare 凭据或访问真实 Bangumi 服务。
 
 ### 1. 安装 Wrangler 并登录
 

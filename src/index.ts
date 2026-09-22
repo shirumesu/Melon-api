@@ -173,6 +173,8 @@ async function getSubject(
   env: Env,
 ): Promise<Response> {
   const full = !["0", "false"].includes(url.searchParams.get("full") ?? "");
+  const includeHtml = full &&
+    !["0", "false"].includes(url.searchParams.get("includeHtml") ?? "");
   const force = boolParam(url.searchParams.get("force"));
   const key = cacheKey(["subjects", subjectId, full ? "full" : "brief"]);
   const result = await getOrSetJson(
@@ -183,15 +185,16 @@ async function getSubject(
       const client = new BangumiClient(env);
       if (!full) return client.getSubject(subjectId);
 
-      const subject = await client.getSubjectRaw(subjectId);
       const notes: string[] = [];
       const [
+        subject,
         episodes,
         characters,
         staff,
         relatedSubjects,
         schedule,
       ] = await Promise.all([
+        client.getSubjectRaw(subjectId),
         client.getEpisodes(subjectId).catch((error) => {
           notes.push(note("episodes", error));
           return [];
@@ -230,7 +233,7 @@ async function getSubject(
       return detail;
     },
   );
-  const data = full
+  const data = includeHtml
     ? await withLiveSubjectHtmlParts(
         result.value as SubjectDetail,
         subjectId,
@@ -239,7 +242,7 @@ async function getSubject(
     : result.value;
   return json(
     { data, cache: result.cache },
-    full ? { headers: { "cache-control": "no-store" } } : {},
+    includeHtml ? { headers: { "cache-control": "no-store" } } : {},
   );
 }
 

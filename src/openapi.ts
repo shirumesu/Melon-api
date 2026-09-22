@@ -152,11 +152,15 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           description: [
             "获取单个 Bangumi subject 的详情。默认 full=true，会聚合 subject 基础信息、章节、角色/声优、制作人员、关联条目、吐槽箱、讨论版、播出时间。",
             "full=false 时只返回简略 SubjectListItem，适合列表补全或低成本探测。",
-            "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；full=true 时每次响应都会实时解析并覆盖缓存详情里的 comments/topics，解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
+            "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；默认 full=true 且 includeHtml=true 时每次响应都会实时解析并覆盖缓存详情里的 comments/topics，解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
+            "includeHtml=false 跳过网页抓取，直接复用完整结构化详情缓存，保留章节、角色/声优、制作人员、关联条目与播出时间；comments/topics 为空，可通过独立接口按需获取。full=false 时此参数无效。",
           ].join("\n\n"),
           parameters: [
             pathId("subjectId", "Bangumi subject ID。"),
             queryParam("full", "boolean", "是否返回聚合详情。默认 true。", {
+              default: true,
+            }),
+            queryParam("includeHtml", "boolean", "是否实时抓取评论和讨论。默认 true。", {
               default: true,
             }),
             forceQueryParam(),
