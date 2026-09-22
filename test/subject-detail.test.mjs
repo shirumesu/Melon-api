@@ -47,7 +47,7 @@ async function seedDetail(id) {
     notes: [],
   });
   detail.schedule = { weekday: 4, source: "air-date" };
-  await writeJson(env, cacheKey(["subjects", id, "full"]), {
+  await writeJson(env, cacheKey(["subjects", id, "full-v2"]), {
     value: detail,
     cachedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -70,7 +70,7 @@ test("cached includeHtml=false returns complete structured data without upstream
     assert.equal(response.headers.get("cache-control"), "public, max-age=60");
     const body = await response.json();
     assert.equal(body.cache.hit, true);
-    assert.equal(body.cache.key, `subjects/${id}/full`);
+    assert.equal(body.cache.key, `subjects/${id}/full-v2`);
     assert.deepEqual(body.data, expected);
   }
   assert.deepEqual(requests, []);
@@ -202,6 +202,8 @@ test("cold structured detail starts enrichment before the subject response compl
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.cache.hit, false);
+  assert.equal(paths.includes("/calendar"), false, "Detail must not build the full timetable");
+  assert.equal(paths.includes("/v0/search/subjects"), false, "Detail must not fetch seasonal enrichment");
   assert.equal(body.data.episodes[0].episodeId, 11);
   assert.equal(body.data.characters[0].characterId, 21);
   assert.equal(body.data.staff[0].personId, 31);
@@ -216,4 +218,81 @@ test("cold structured detail starts enrichment before the subject response compl
   assert.equal(cachedBody.cache.hit, true);
   assert.deepEqual(cachedBody.data, body.data);
   assert.deepEqual(paths, []);
+});
+
+test("expired structured details return before background revalidation finishes", async (t) => {
+  const id = 90005;
+  const expected = await seedDetail(id);
+  await writeJson(env, cacheKey(["subjects", id, "full-v2"]), {
+    value: expected,
+    cachedAt: new Date(Date.now() - 60_000).toISOString(),
+    expiresAt: new Date(Date.now() - 1000).toISOString(),
+  });
+  const subjectGate = Promise.withResolvers();
+  const tasks = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === `/v0/subjects/${id}`) {
+      await subjectGate.promise;
+      return Response.json({ ...rawSubject(id), name_cn: "Updated title" });
+    }
+    if (url.pathname === "/v0/episodes") return Response.json({ data: [] });
+    return Response.json([]);
+  });
+  let completed = false;
+  const response = worker.fetch(
+    new Request(`https://melon.example.test/v1/subjects/${id}?includeHtml=false`),
+    env,
+    { waitUntil(task) { tasks.push(task); } },
+  ).then((response) => { completed = true; return response; });
+  try {
+    await setImmediate();
+    assert.equal(completed, true, "Cached detail must not await the remote subject");
+    const body = await (await response).json();
+    assert.equal(body.data.displayName, expected.displayName);
+    assert.equal(body.cache.stale, true);
+  } finally {
+    subjectGate.resolve();
+    await Promise.all(tasks);
+  }
+  const updated = await readSubject(id, "?includeHtml=false");
+  assert.equal((await updated.json()).data.displayName, "Updated title");
+});
+
+test("cold detail responds while both source and final R2 writes are pending", async (t) => {
+  const id = 90006;
+  const writeGate = Promise.withResolvers();
+  const tasks = [], writes = [];
+  const requestEnv = {
+    ...env,
+    BANGUMI_DATA_SOURCE: "https://data.example.test/cold-rules.json",
+    CACHE_BUCKET: {
+      async get() { return null; },
+      async put(key) { writes.push(key); await writeGate.promise; },
+    },
+  };
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/cold-rules.json") return Response.json({ items: [] });
+    if (url.pathname === `/v0/subjects/${id}`) return Response.json(rawSubject(id));
+    if (url.pathname === "/v0/episodes") return Response.json({ data: [] });
+    return Response.json([]);
+  });
+  let completed = false;
+  const response = worker.fetch(
+    new Request(`https://melon.example.test/v1/subjects/${id}?includeHtml=false`),
+    requestEnv,
+    { waitUntil(task) { tasks.push(task); } },
+  ).then((response) => { completed = true; return response; });
+  try {
+    await setImmediate();
+    assert.equal(completed, true, "Source and final R2 persistence must not delay cold detail");
+    assert.equal((await response).status, 200);
+    assert.equal(writes.length, 2);
+    assert.ok(writes.some((key) => key.startsWith("source/bangumi-data/")));
+    assert.ok(writes.includes(`subjects/${id}/full-v2`));
+  } finally {
+    writeGate.resolve();
+    await Promise.all(tasks);
+  }
 });

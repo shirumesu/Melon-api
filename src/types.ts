@@ -13,6 +13,7 @@ export type Env = {
 export type CachePolicy = {
   ttlSeconds: number;
   force?: boolean;
+  staleWhileRevalidateSeconds?: number;
 };
 
 export type Paged<T> = {

@@ -9,7 +9,7 @@ import { docsHtml, openApiSpec } from "./openapi";
 import {
   buildScheduleResponse,
   fallbackScheduleFromAirDate,
-  scheduleForSubject,
+  loadSubjectSchedule,
 } from "./schedule";
 import type { Env, HttpError, ScheduleResponse, SubjectDetail } from "./types";
 import {
@@ -94,7 +94,7 @@ async function route(
   if (request.method === "GET" && path === "v1/subjects/search")
     return searchSubjects(url, env);
   if (request.method === "GET" && /^v1\/subjects\/\d+$/.test(path)) {
-    return getSubject(Number(path.split("/")[2]), url, env);
+    return getSubject(Number(path.split("/")[2]), url, env, ctx);
   }
   if (request.method === "GET" && /^v1\/subjects\/\d+\/episodes$/.test(path)) {
     return getSubjectEpisodes(Number(path.split("/")[2]), url, env);
@@ -121,13 +121,13 @@ async function route(
     return getEpisodeComments(Number(path.split("/")[2]), env);
   }
   if (request.method === "GET" && path === "v1/schedule/latest")
-    return getSchedule(url, env);
+    return getSchedule(url, env, ctx);
   if (request.method === "GET" && path === "v1/schedule/today")
-    return getTodaySchedule(url, env);
+    return getTodaySchedule(url, env, ctx);
   if (request.method === "GET" && path === "v1/seasons/current")
-    return getSeason(url, env, "current");
+    return getSeason(url, env, "current", ctx);
   if (request.method === "GET" && path === "v1/trending/current")
-    return getSeason(url, env, "trending");
+    return getSeason(url, env, "trending", ctx);
   if (request.method === "POST" && path === "v1/internal/refresh") {
     const rejected = requireAdmin(request, env);
     if (rejected) return rejected;
@@ -171,16 +171,21 @@ async function getSubject(
   subjectId: number,
   url: URL,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const full = !["0", "false"].includes(url.searchParams.get("full") ?? "");
   const includeHtml = full &&
     !["0", "false"].includes(url.searchParams.get("includeHtml") ?? "");
   const force = boolParam(url.searchParams.get("force"));
-  const key = cacheKey(["subjects", subjectId, full ? "full" : "brief"]);
+  const key = cacheKey(["subjects", subjectId, full ? "full-v2" : "brief"]);
   const result = await getOrSetJson(
     env,
     key,
-    { ttlSeconds: full ? 6 * 60 * 60 : 60 * 60, force },
+    {
+      ttlSeconds: full ? 6 * 60 * 60 : 60 * 60,
+      force,
+      staleWhileRevalidateSeconds: 24 * 60 * 60,
+    },
     async () => {
       const client = new BangumiClient(env);
       if (!full) return client.getSubject(subjectId);
@@ -211,7 +216,13 @@ async function getSubject(
           notes.push(note("relatedSubjects", error));
           return [];
         }),
-        getScheduleValue(url, env).catch((error) => {
+        loadSubjectSchedule(
+          env,
+          subjectId,
+          url.searchParams.get("date") ?? undefined,
+          force,
+          (task) => ctx.waitUntil(task),
+        ).catch((error) => {
           notes.push(note("schedule", error));
           return null;
         }),
@@ -226,12 +237,10 @@ async function getSubject(
         topics: [],
         notes,
       });
-      detail.schedule = schedule
-        ? (scheduleForSubject(schedule.items, subjectId) ??
-          fallbackScheduleFromAirDate(detail.airDate))
-        : fallbackScheduleFromAirDate(detail.airDate);
+      detail.schedule = schedule ?? fallbackScheduleFromAirDate(detail.airDate);
       return detail;
     },
+    includeHtml ? undefined : (task) => ctx.waitUntil(task),
   );
   const data = includeHtml
     ? await withLiveSubjectHtmlParts(
@@ -306,7 +315,7 @@ async function getSubjectEpisodes(
   const client = new BangumiClient(env);
   const result = await getOrSetJson(
     env,
-    cacheKey(["subjects", subjectId, "episodes"]),
+    cacheKey(["subjects", subjectId, "episodes-v2"]),
     { ttlSeconds: 6 * 60 * 60, force },
     () => client.getEpisodes(subjectId),
   );
@@ -415,13 +424,21 @@ async function getEpisodeComments(
   );
 }
 
-async function getSchedule(url: URL, env: Env): Promise<Response> {
-  const result = await getScheduleCached(url, env);
+async function getSchedule(
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const result = await getScheduleCached(url, env, false, ctx);
   return json({ ...result.value, cache: result.cache });
 }
 
-async function getTodaySchedule(url: URL, env: Env): Promise<Response> {
-  const schedule = await getScheduleCached(url, env);
+async function getTodaySchedule(
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const schedule = await getScheduleCached(url, env, false, ctx);
   const today = currentShanghaiDate();
   return json({
     generatedAt: schedule.value.generatedAt,
@@ -435,6 +452,7 @@ async function getSeason(
   url: URL,
   env: Env,
   mode: "current" | "trending",
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const season = parseSeason(url.searchParams.get("season"));
   const range = seasonDateRange(season);
@@ -477,8 +495,13 @@ async function getSeason(
   const result = await getOrSetJson(
     env,
     key,
-    { ttlSeconds: 12 * 60 * 60, force },
+    {
+      ttlSeconds: 12 * 60 * 60,
+      force,
+      staleWhileRevalidateSeconds: 24 * 60 * 60,
+    },
     () => client.searchSubjects(input),
+    ctx ? (task) => ctx.waitUntil(task) : undefined,
   );
   return json({
     season,
@@ -506,6 +529,7 @@ async function getScheduleCached(
   url: URL,
   env: Env,
   forceOverride = false,
+  ctx?: ExecutionContext,
 ): Promise<Awaited<ReturnType<typeof getOrSetJson<ScheduleResponse>>>> {
   const days = clampInt(url.searchParams.get("days"), 7, 0, 31);
   const date = url.searchParams.get("date") ?? currentShanghaiDate();
@@ -518,7 +542,7 @@ async function getScheduleCached(
   const keyParts =
     includeNsfw || !includeUnknownNsfw
       ? [
-          "schedule",
+          "schedule-v2",
           date,
           days,
           requireBroadcast,
@@ -526,24 +550,23 @@ async function getScheduleCached(
           includeNsfw,
           includeUnknownNsfw,
         ]
-      : ["schedule", date, days, requireBroadcast];
+      : ["schedule-v2", date, days, requireBroadcast];
   return getOrSetJson(
     env,
     cacheKey(keyParts),
-    { ttlSeconds: 24 * 60 * 60, force },
+    {
+      ttlSeconds: 24 * 60 * 60,
+      force,
+      staleWhileRevalidateSeconds: 24 * 60 * 60,
+    },
     () =>
-      buildScheduleResponse(env, {
-        days,
-        date,
-        requireBroadcast,
-        includeNsfw,
-        includeUnknownNsfw,
-      }),
+      buildScheduleResponse(
+        env,
+        { days, date, force, requireBroadcast, includeNsfw, includeUnknownNsfw },
+        ctx ? (task) => ctx.waitUntil(task) : undefined,
+      ),
+    ctx ? (task) => ctx.waitUntil(task) : undefined,
   );
-}
-
-async function getScheduleValue(url: URL, env: Env): Promise<ScheduleResponse> {
-  return (await getScheduleCached(url, env)).value;
 }
 
 function searchInputFromUrl(url: URL): SearchInput {

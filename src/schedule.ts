@@ -1,3 +1,4 @@
+import { cacheKey, getOrSetJson } from "./cache";
 import { BangumiClient, subjectIdFromSites } from "./bangumi";
 import type {
   Env,
@@ -42,10 +43,12 @@ export async function buildScheduleResponse(
   input: {
     days: number;
     date?: string;
+    force?: boolean;
     requireBroadcast?: boolean;
     includeNsfw?: boolean;
     includeUnknownNsfw?: boolean;
   },
+  background?: (task: Promise<unknown>) => void,
 ): Promise<ScheduleResponse> {
   const centerDate = input.date ?? currentShanghaiDate();
   const windowStart = shanghaiDayStartUtc(
@@ -54,7 +57,7 @@ export async function buildScheduleResponse(
   const windowEnd = shanghaiDayStartUtc(
     addDaysToDateString(centerDate, input.days + 1),
   );
-  const data = await loadBangumiData(env);
+  const data = await loadBangumiData(env, input.force, background);
   const subjectIds = collectScheduleSubjectIds(
     data.items ?? [],
     windowStart,
@@ -65,6 +68,8 @@ export async function buildScheduleResponse(
     windowStart,
     windowEnd,
     subjectIds,
+    input.force,
+    background,
   ).catch((error) => {
     console.warn("schedule enrichment unavailable", error);
     return new Map<number, SubjectListItem>();
@@ -95,10 +100,24 @@ export async function buildScheduleResponse(
   };
 }
 
-export async function loadBangumiData(env: Env): Promise<BangumiData> {
+export async function loadBangumiData(
+  env: Env,
+  force = false,
+  background?: (task: Promise<unknown>) => void,
+): Promise<BangumiData> {
   const configured =
     env.BANGUMI_DATA_SOURCE ??
     "https://cdn.jsdelivr.net/npm/bangumi-data@0.3/dist/data.json";
+  return (await getOrSetJson(
+    env,
+    cacheKey(["source", "bangumi-data", configured]),
+    { ttlSeconds: 6 * 60 * 60, force },
+    () => fetchBangumiData(env, configured),
+    background,
+  )).value;
+}
+
+async function fetchBangumiData(env: Env, configured: string): Promise<BangumiData> {
   const sources = unique([
     configured,
     "https://cdn.jsdelivr.net/npm/bangumi-data@0.3/dist/data.json",
@@ -135,23 +154,32 @@ async function loadScheduleEnrichment(
   start: Date,
   end: Date,
   subjectIds: number[],
+  force = false,
+  background?: (task: Promise<unknown>) => void,
 ): Promise<Map<number, SubjectListItem>> {
   const client = new BangumiClient(env);
   const bySubjectId = new Map<number, SubjectListItem>();
-
-  const calendarSubjects = await client.getCalendarSubjects().catch((error) => {
-    console.warn("Bangumi calendar enrichment unavailable", error);
-    return [];
-  });
-  for (const subject of calendarSubjects)
-    bySubjectId.set(subject.subjectId, subject);
-
   const seasons = seasonsInWindow(start, end);
-  await Promise.all(
-    seasons.map(async (season) => {
+  const [calendarSubjects, ...seasonPages] = await Promise.all([
+    getOrSetJson(
+      env,
+      "source/calendar",
+      { ttlSeconds: 60 * 60, force },
+      () => client.getCalendarSubjects(),
+      background,
+    )
+      .then((result) => result.value)
+      .catch((error) => {
+        console.warn("Bangumi calendar enrichment unavailable", error);
+        return [];
+      }),
+    ...seasons.map(async (season) => {
       const range = seasonDateRange(season);
-      const page = await client
-        .searchSubjects({
+      return getOrSetJson(
+        env,
+        cacheKey(["source", "season", season.code]),
+        { ttlSeconds: 6 * 60 * 60, force },
+        () => client.searchSubjects({
           q: "",
           limit: 100,
           offset: 0,
@@ -162,29 +190,59 @@ async function loadScheduleEnrichment(
           ratings: [],
           ranks: [],
           includeNsfw: true,
-        })
+        }),
+        background,
+      )
+        .then((result) => result.value.data)
         .catch((error) => {
-          console.warn(
-            `Bangumi season enrichment unavailable for ${season.code}`,
-            error,
-          );
-          return null;
+          console.warn(`Bangumi season enrichment unavailable for ${season.code}`, error);
+          return [];
         });
-      for (const subject of page?.data ?? [])
-        bySubjectId.set(subject.subjectId, subject);
     }),
-  );
-
-  const preciseSubjects = await client
-    .getSubjectsByIds(subjectIds)
-    .catch((error) => {
-      console.warn("Bangumi precise schedule enrichment unavailable", error);
-      return [];
-    });
-  for (const subject of preciseSubjects)
+  ]);
+  for (const subject of [...calendarSubjects, ...seasonPages.flat()]) {
     bySubjectId.set(subject.subjectId, subject);
-
+  }
+  const missing = subjectIds.filter((id) => {
+    const subject = bySubjectId.get(id);
+    return !subject?.coverUrl || !subject.episodeTotal || subject.nsfw == null;
+  });
+  for (const subject of await client.getSubjectsByIds(missing, force, background)) {
+    const previous = bySubjectId.get(subject.subjectId);
+    bySubjectId.set(subject.subjectId, {
+      ...previous,
+      ...subject,
+      coverUrl: subject.coverUrl ?? previous?.coverUrl,
+      episodeTotal: subject.episodeTotal ?? previous?.episodeTotal,
+      nsfw: subject.nsfw ?? previous?.nsfw,
+    });
+  }
   return bySubjectId;
+}
+
+export async function loadSubjectSchedule(
+  env: Env,
+  subjectId: number,
+  date = currentShanghaiDate(),
+  force = false,
+  background?: (task: Promise<unknown>) => void,
+): Promise<SubjectSchedule | undefined> {
+  const data = await loadBangumiData(env, force, background);
+  const matching = (data.items ?? []).filter(
+    (item) => subjectIdFromSites(pickSites(item.sites ?? [])) === subjectId,
+  );
+  const occurrences = buildSchedule(
+    matching,
+    shanghaiDayStartUtc(addDaysToDateString(date, -7)),
+    shanghaiDayStartUtc(addDaysToDateString(date, 8)),
+    {
+      requireBroadcast: false,
+      includeNsfw: true,
+      includeUnknownNsfw: true,
+      enrichment: new Map(),
+    },
+  );
+  return scheduleForSubject(occurrences, subjectId);
 }
 
 export function scheduleForSubject(

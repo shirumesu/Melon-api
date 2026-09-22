@@ -1,3 +1,4 @@
+import { cacheKey, getOrSetJson } from "./cache";
 import type {
   CharacterCredit,
   Env,
@@ -201,8 +202,28 @@ export class BangumiClient {
     return this.mapSubjectListItem(subject);
   }
 
-  async getSubjectsByIds(subjectIds: number[]): Promise<SubjectListItem[]> {
-    return mapLimit(subjectIds, 8, (subjectId) => this.getSubject(subjectId));
+  async getSubjectsByIds(
+    subjectIds: number[],
+    force = false,
+    background?: (task: Promise<unknown>) => void,
+  ): Promise<SubjectListItem[]> {
+    const subjects = await mapLimit(subjectIds, 8, async (subjectId) => {
+      try {
+        return (await getOrSetJson(
+          this.env,
+          cacheKey(["subjects", subjectId, "brief"]),
+          { ttlSeconds: 60 * 60, force },
+          () => this.getSubject(subjectId),
+          background,
+        )).value;
+      } catch (error) {
+        console.warn(`Schedule subject ${subjectId} unavailable`, error);
+        return null;
+      }
+    });
+    return subjects.filter(
+      (subject): subject is SubjectListItem => subject != null,
+    );
   }
 
   async getSubjectRaw(subjectId: number): Promise<BangumiSubject> {
@@ -210,10 +231,22 @@ export class BangumiClient {
   }
 
   async getEpisodes(subjectId: number): Promise<Episode[]> {
-    const response = await this.fetchJson<EpisodesResponse>(
-      `/v0/episodes?subject_id=${subjectId}&type=0&limit=200&offset=0`,
-    );
-    return response.data
+    const page = (offset: number) =>
+      this.fetchJson<EpisodesResponse>(
+        `/v0/episodes?subject_id=${subjectId}&type=0&limit=200&offset=${offset}`,
+      );
+    const first = await page(0);
+    const pageSize = first.data.length;
+    const total = first.total ?? pageSize;
+    const offsets: number[] = [];
+    if (pageSize > 0) {
+      for (let offset = pageSize; offset < total; offset += pageSize) {
+        offsets.push(offset);
+      }
+    }
+    const rest = await mapLimit(offsets, 4, page);
+    return [first, ...rest]
+      .flatMap((response) => response.data)
       .filter((episode) => episode.id > 0 && episode.type === 0)
       .map((episode) => this.mapEpisode(episode, subjectId));
   }

@@ -6,7 +6,20 @@ type CacheEnvelope<T> = {
   expiresAt: string;
 };
 
+type CacheResult<T> = {
+  value: T;
+  cache: {
+    key: string;
+    hit: boolean;
+    cachedAt: string;
+    expiresAt: string;
+    stale?: boolean;
+  };
+};
+
 const memoryCache = new Map<string, CacheEnvelope<unknown>>();
+const pendingReads = new Map<string, Promise<CacheEnvelope<unknown> | null>>();
+const pendingLoads = new Map<string, Promise<CacheEnvelope<unknown>>>();
 const MAX_MEMORY_CACHE_ENTRIES = 256;
 const MAX_DELETE_BATCH_SIZE = 1000;
 const DEFAULT_STALE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -16,16 +29,8 @@ export async function getOrSetJson<T>(
   key: string,
   policy: CachePolicy,
   loader: () => Promise<T>,
-): Promise<{
-  value: T;
-  cache: {
-    key: string;
-    hit: boolean;
-    cachedAt: string;
-    expiresAt: string;
-    stale?: boolean;
-  };
-}> {
+  background?: (task: Promise<unknown>) => void,
+): Promise<CacheResult<T>> {
   let stale: CacheEnvelope<T> | null = null;
   if (!policy.force) {
     const cached = await readJson<T>(env, key, { allowExpired: true }).catch(
@@ -36,57 +41,86 @@ export async function getOrSetJson<T>(
     );
     if (cached) {
       if (Date.parse(cached.expiresAt) > Date.now()) {
-        return {
-          value: cached.value,
-          cache: {
-            key,
-            hit: true,
-            cachedAt: cached.cachedAt,
-            expiresAt: cached.expiresAt,
-          },
-        };
+        return result(key, cached, true);
       }
       stale = cached;
     }
   }
 
-  let value: T;
+  if (
+    stale &&
+    background &&
+    policy.staleWhileRevalidateSeconds &&
+    Date.now() - Date.parse(stale.expiresAt) <=
+      policy.staleWhileRevalidateSeconds * 1000
+  ) {
+    background(
+      loadFresh(env, key, policy, loader, background).catch((error) => {
+        console.warn(`Background refresh failed for ${key}`, error);
+      }),
+    );
+    return result(key, stale, true, true);
+  }
   try {
-    value = await loader();
+    const fresh = await loadFresh(env, key, policy, loader, background);
+    return result(key, fresh, false);
   } catch (error) {
     if (stale) {
       console.warn(`Loader failed for ${key}; returning stale cache`, error);
-      return {
-        value: stale.value,
-        cache: {
-          key,
-          hit: true,
-          stale: true,
-          cachedAt: stale.cachedAt,
-          expiresAt: stale.expiresAt,
-        },
-      };
+      return result(key, stale, true, true);
     }
     throw error;
   }
-  const now = new Date();
-  const envelope: CacheEnvelope<T> = {
-    value,
-    cachedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + policy.ttlSeconds * 1000).toISOString(),
-  };
-  await writeJson(env, key, envelope).catch((error) => {
-    console.warn(`Cache write failed for ${key}`, error);
-  });
+}
+
+function result<T>(
+  key: string,
+  envelope: CacheEnvelope<T>,
+  hit: boolean,
+  stale = false,
+): CacheResult<T> {
   return {
-    value,
+    value: envelope.value,
     cache: {
       key,
-      hit: false,
+      hit,
       cachedAt: envelope.cachedAt,
       expiresAt: envelope.expiresAt,
+      ...(stale ? { stale: true } : {}),
     },
   };
+}
+
+async function loadFresh<T>(
+  env: Env,
+  key: string,
+  policy: CachePolicy,
+  loader: () => Promise<T>,
+  background?: (task: Promise<unknown>) => void,
+): Promise<CacheEnvelope<T>> {
+  const pending = pendingLoads.get(key);
+  if (pending) return pending as Promise<CacheEnvelope<T>>;
+  const loading = (async () => {
+    const value = await loader();
+    const now = new Date();
+    const envelope = {
+      value,
+      cachedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + policy.ttlSeconds * 1000).toISOString(),
+    };
+    const writing = writeJson(env, key, envelope).catch((error) => {
+      console.warn(`Cache write failed for ${key}`, error);
+    });
+    if (background && env.CACHE_BUCKET) background(writing);
+    else await writing;
+    return envelope;
+  })();
+  pendingLoads.set(key, loading);
+  try {
+    return await loading;
+  } finally {
+    pendingLoads.delete(key);
+  }
 }
 
 export async function readJson<T>(
@@ -94,23 +128,34 @@ export async function readJson<T>(
   key: string,
   options: { allowExpired?: boolean } = {},
 ): Promise<CacheEnvelope<T> | null> {
-  const memory = memoryCache.get(key) as CacheEnvelope<T> | undefined;
-  if (memory) {
-    if (options.allowExpired || Date.parse(memory.expiresAt) > Date.now()) {
-      memoryCache.delete(key);
-      memoryCache.set(key, memory);
-      return memory;
+  let envelope = memoryCache.get(key) as CacheEnvelope<T> | undefined | null;
+  if (!envelope && env.CACHE_BUCKET) {
+    let pending = pendingReads.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const object = await env.CACHE_BUCKET!.get(key);
+        if (!object) return null;
+        const stored = await object.json<CacheEnvelope<T>>();
+        const newer = memoryCache.get(key);
+        if (newer && Date.parse(newer.cachedAt) > Date.parse(stored.cachedAt)) {
+          return newer;
+        }
+        remember(key, stored);
+        return stored;
+      })();
+      pendingReads.set(key, pending);
     }
-    memoryCache.delete(key);
+    try {
+      envelope = (await pending) as CacheEnvelope<T> | null;
+    } finally {
+      pendingReads.delete(key);
+    }
   }
-
-  if (!env.CACHE_BUCKET) return null;
-  const object = await env.CACHE_BUCKET.get(key);
-  if (!object) return null;
-  const envelope = (await object.json()) as CacheEnvelope<T>;
+  if (!envelope) return null;
   if (!options.allowExpired && Date.parse(envelope.expiresAt) <= Date.now()) {
     return null;
   }
+  remember(key, envelope);
   return envelope;
 }
 
@@ -119,26 +164,17 @@ export async function writeJson<T>(
   key: string,
   envelope: CacheEnvelope<T>,
 ): Promise<void> {
-  memoryCache.delete(key);
-  memoryCache.set(key, envelope);
-  pruneMemoryCache();
+  remember(key, envelope);
   if (!env.CACHE_BUCKET) return;
   await env.CACHE_BUCKET.put(key, JSON.stringify(envelope), {
-    httpMetadata: {
-      contentType: "application/json; charset=utf-8",
-    },
-    customMetadata: {
-      cachedAt: envelope.cachedAt,
-      expiresAt: envelope.expiresAt,
-    },
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { cachedAt: envelope.cachedAt, expiresAt: envelope.expiresAt },
   });
 }
 
-function pruneMemoryCache(): void {
-  const now = Date.now();
-  for (const [key, envelope] of memoryCache) {
-    if (Date.parse(envelope.expiresAt) <= now) memoryCache.delete(key);
-  }
+function remember(key: string, envelope: CacheEnvelope<unknown>): void {
+  memoryCache.delete(key);
+  memoryCache.set(key, envelope);
   while (memoryCache.size > MAX_MEMORY_CACHE_ENTRIES) {
     const oldest = memoryCache.keys().next().value;
     if (oldest === undefined) break;
