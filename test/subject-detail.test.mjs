@@ -47,7 +47,7 @@ async function seedDetail(id) {
     notes: [],
   });
   detail.schedule = { weekday: 4, source: "air-date" };
-  await writeJson(env, cacheKey(["subjects", id, "full-v2"]), {
+  await writeJson(env, cacheKey(["subjects", id, "full-v3"]), {
     value: detail,
     cachedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -70,7 +70,7 @@ test("cached includeHtml=false returns complete structured data without upstream
     assert.equal(response.headers.get("cache-control"), "public, max-age=60");
     const body = await response.json();
     assert.equal(body.cache.hit, true);
-    assert.equal(body.cache.key, `subjects/${id}/full-v2`);
+    assert.equal(body.cache.key, `subjects/${id}/full-v3`);
     assert.deepEqual(body.data, expected);
   }
   assert.deepEqual(requests, []);
@@ -155,7 +155,10 @@ test("cold structured detail starts enrichment before the subject response compl
     const url = new URL(input);
     paths.push(url.pathname);
     if (url.origin === new URL(env.BANGUMI_DATA_SOURCE).origin) {
-      return Response.json({ items: [] });
+      return Response.json({ items: [
+        { title: "Original", titleTranslate: { "zh-Hans": ["微速前行 第二季"], "zh-Hant": ["微速前進！2！！", "微速前進！2！！"] }, sites: [{ site: "bangumi", id: String(id) }] },
+        { title: "Other season", titleTranslate: { "zh-Hant": ["第一季"] }, sites: [{ site: "bangumi", id: "454082" }] },
+      ] });
     }
     assert.equal(url.origin, env.BANGUMI_API_BASE, "Structured detail must not request HTML");
     switch (url.pathname) {
@@ -204,6 +207,8 @@ test("cold structured detail starts enrichment before the subject response compl
   assert.equal(body.cache.hit, false);
   assert.equal(paths.includes("/calendar"), false, "Detail must not build the full timetable");
   assert.equal(paths.includes("/v0/search/subjects"), false, "Detail must not fetch seasonal enrichment");
+  assert.deepEqual(body.data.aliases, ["Original", "微速前行 第二季", "微速前進！2！！"]);
+  assert.equal(paths.filter((path) => path === "/schedule.json").length, 1);
   assert.equal(body.data.episodes[0].episodeId, 11);
   assert.equal(body.data.characters[0].characterId, 21);
   assert.equal(body.data.staff[0].personId, 31);
@@ -223,7 +228,7 @@ test("cold structured detail starts enrichment before the subject response compl
 test("expired structured details return before background revalidation finishes", async (t) => {
   const id = 90005;
   const expected = await seedDetail(id);
-  await writeJson(env, cacheKey(["subjects", id, "full-v2"]), {
+  await writeJson(env, cacheKey(["subjects", id, "full-v3"]), {
     value: expected,
     cachedAt: new Date(Date.now() - 60_000).toISOString(),
     expiresAt: new Date(Date.now() - 1000).toISOString(),
@@ -290,7 +295,7 @@ test("cold detail responds while both source and final R2 writes are pending", a
     assert.equal((await response).status, 200);
     assert.equal(writes.length, 2);
     assert.ok(writes.some((key) => key.startsWith("source/bangumi-data/")));
-    assert.ok(writes.includes(`subjects/${id}/full-v2`));
+    assert.ok(writes.includes(`subjects/${id}/full-v3`));
   } finally {
     writeGate.resolve();
     await Promise.all(tasks);

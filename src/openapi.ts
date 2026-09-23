@@ -559,6 +559,11 @@ function schemas(): Record<string, unknown> {
           ratingCount: { type: "integer" },
           rating: schemaRef("Rating"),
           collectionStats: schemaRef("SubjectCollectionStats"),
+          aliases: {
+            type: "array",
+            items: { type: "string" },
+            description: "按 Bangumi subjectId 关联 bangumi-data 的原名及各地区译名；不根据相似标题推断。数据缺失或不可用时为空数组。",
+          },
           infoBox: arrayOf("SubjectInfoBoxItem"),
           episodes: arrayOf("Episode"),
           characters: arrayOf("CharacterCredit"),

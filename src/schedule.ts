@@ -232,6 +232,19 @@ function mergeScheduleSubject(
   };
 }
 
+export async function loadSubjectAliases(
+  env: Env,
+  subjectId: number,
+  force = false,
+  background?: (task: Promise<unknown>) => void,
+): Promise<string[]> {
+  const data = await loadBangumiData(env, force, background);
+  const names = (data.items ?? [])
+    .filter((item) => subjectIdFromSites(pickSites(item.sites ?? [])) === subjectId)
+    .flatMap((item) => [item.title, ...Object.values(item.titleTranslate ?? {}).flat()]);
+  return unique(names.map((name) => name.trim()).filter(Boolean));
+}
+
 export async function loadSubjectSchedule(
   env: Env,
   subjectId: number,

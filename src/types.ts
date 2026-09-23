@@ -81,6 +81,7 @@ export type SubjectDetail = SubjectListItem & {
     count?: Record<string, number>;
   };
   collectionStats?: SubjectCollectionStats;
+  aliases?: string[];
   infoBox: SubjectInfoBoxItem[];
   episodes: Episode[];
   characters: CharacterCredit[];

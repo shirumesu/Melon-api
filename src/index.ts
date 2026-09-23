@@ -10,6 +10,7 @@ import {
   buildScheduleResponse,
   fallbackScheduleFromAirDate,
   loadSubjectSchedule,
+  loadSubjectAliases,
 } from "./schedule";
 import type { Env, HttpError, ScheduleResponse, SubjectDetail } from "./types";
 import {
@@ -177,7 +178,7 @@ async function getSubject(
   const includeHtml = full &&
     !["0", "false"].includes(url.searchParams.get("includeHtml") ?? "");
   const force = boolParam(url.searchParams.get("force"));
-  const key = cacheKey(["subjects", subjectId, full ? "full-v2" : "brief"]);
+  const key = cacheKey(["subjects", subjectId, full ? "full-v3" : "brief"]);
   const result = await getOrSetJson(
     env,
     key,
@@ -197,6 +198,7 @@ async function getSubject(
         characters,
         staff,
         relatedSubjects,
+        aliases,
         schedule,
       ] = await Promise.all([
         client.getSubjectRaw(subjectId),
@@ -214,6 +216,10 @@ async function getSubject(
         }),
         client.getRelatedSubjects(subjectId).catch((error) => {
           notes.push(note("relatedSubjects", error));
+          return [];
+        }),
+        loadSubjectAliases(env, subjectId, force, (task) => ctx.waitUntil(task)).catch((error) => {
+          notes.push(note("aliases", error));
           return [];
         }),
         loadSubjectSchedule(
@@ -237,6 +243,7 @@ async function getSubject(
         topics: [],
         notes,
       });
+      detail.aliases = aliases;
       detail.schedule = schedule ?? fallbackScheduleFromAirDate(detail.airDate);
       return detail;
     },

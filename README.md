@@ -57,6 +57,8 @@ GET /v1/subjects/531063
 它复用完整详情缓存，保留章节、角色与声优、制作人员、简介、评分、关联条目和播出时间，
 不等待评论与讨论网页抓取；`comments` 和 `topics` 返回空数组。
 需要评论时再请求 `/v1/subjects/{id}/comments` 或 `/v1/subjects/{id}/topics`。
+完整详情的 `aliases` 返回按 Bangumi subjectId 关联的 bangumi-data 原名及地区译名（含繁体名称），
+与放送规则共用上游缓存；数据缺失或不可用时返回空数组，不猜测译名。
 不传该参数的默认行为不变；`full=false` 仍返回简略条目。
 
 ### 数据完整性与缓存
