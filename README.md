@@ -89,6 +89,11 @@ GET /v1/episodes/1656040/comments
 
 ## 如何部署
 
+本项目的生产 Worker 已通过 Cloudflare Workers Builds 连接 GitHub。
+将提交推送到 `master` 后由 Cloudflare 自动构建并部署；在提交检查
+`Workers Builds: melon-api` 中确认结果。日常发布不需要本机 Wrangler 登录。
+以下手动部署步骤适用于新实例配置或明确需要的手动恢复。
+
 本地开发使用 Node.js 22.15 或以上版本。安装依赖后运行 `pnpm test`，
 它会先检查 TypeScript 类型，再用 Node 内置测试运行器验证详情路由、
 缓存命中时跳过 HTML、默认评论兼容性、并行加载、完整章节分页、时间表封面补全和缓存刷新。测试使用模拟上游响应，
