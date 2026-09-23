@@ -27,19 +27,30 @@ const DEFAULT_STALE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 export async function getOrSetJson<T>(
   env: Env,
   key: string,
-  policy: CachePolicy,
+  policy: CachePolicy<T>,
   loader: () => Promise<T>,
   background?: (task: Promise<unknown>) => void,
 ): Promise<CacheResult<T>> {
   let stale: CacheEnvelope<T> | null = null;
   if (!policy.force) {
-    const cached = await readJson<T>(env, key, { allowExpired: true }).catch(
+    let cached = await readJson<T>(env, key, { allowExpired: true }).catch(
       (error) => {
         console.warn(`Cache read failed for ${key}`, error);
         return null;
       },
     );
     if (cached) {
+      // Apply current policy to persisted envelopes too, including caches made
+      // before incomplete responses had a shorter lifetime.
+      if (typeof policy.ttlSeconds === "function") {
+        cached = {
+          ...cached,
+          expiresAt: new Date(Math.min(
+            Date.parse(cached.expiresAt),
+            Date.parse(cached.cachedAt) + policy.ttlSeconds(cached.value) * 1000,
+          )).toISOString(),
+        };
+      }
       if (Date.parse(cached.expiresAt) > Date.now()) {
         return result(key, cached, true);
       }
@@ -50,6 +61,7 @@ export async function getOrSetJson<T>(
   if (
     stale &&
     background &&
+    (policy.canServeStale?.(stale.value) ?? true) &&
     policy.staleWhileRevalidateSeconds &&
     Date.now() - Date.parse(stale.expiresAt) <=
       policy.staleWhileRevalidateSeconds * 1000
@@ -94,7 +106,7 @@ function result<T>(
 async function loadFresh<T>(
   env: Env,
   key: string,
-  policy: CachePolicy,
+  policy: CachePolicy<T>,
   loader: () => Promise<T>,
   background?: (task: Promise<unknown>) => void,
 ): Promise<CacheEnvelope<T>> {
@@ -103,10 +115,13 @@ async function loadFresh<T>(
   const loading = (async () => {
     const value = await loader();
     const now = new Date();
+    const ttl = typeof policy.ttlSeconds === "function"
+      ? policy.ttlSeconds(value)
+      : policy.ttlSeconds;
     const envelope = {
       value,
       cachedAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + policy.ttlSeconds * 1000).toISOString(),
+      expiresAt: new Date(now.getTime() + ttl * 1000).toISOString(),
     };
     const writing = writeJson(env, key, envelope).catch((error) => {
       console.warn(`Cache write failed for ${key}`, error);

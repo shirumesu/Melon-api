@@ -201,7 +201,10 @@ async function loadScheduleEnrichment(
     }),
   ]);
   for (const subject of [...calendarSubjects, ...seasonPages.flat()]) {
-    bySubjectId.set(subject.subjectId, subject);
+    bySubjectId.set(
+      subject.subjectId,
+      mergeScheduleSubject(bySubjectId.get(subject.subjectId), subject),
+    );
   }
   const missing = subjectIds.filter((id) => {
     const subject = bySubjectId.get(id);
@@ -209,15 +212,24 @@ async function loadScheduleEnrichment(
   });
   for (const subject of await client.getSubjectsByIds(missing, force, background)) {
     const previous = bySubjectId.get(subject.subjectId);
-    bySubjectId.set(subject.subjectId, {
-      ...previous,
-      ...subject,
-      coverUrl: subject.coverUrl ?? previous?.coverUrl,
-      episodeTotal: subject.episodeTotal ?? previous?.episodeTotal,
-      nsfw: subject.nsfw ?? previous?.nsfw,
-    });
+    bySubjectId.set(subject.subjectId, mergeScheduleSubject(previous, subject));
   }
   return bySubjectId;
+}
+
+function mergeScheduleSubject(
+  previous: SubjectListItem | undefined,
+  subject: SubjectListItem,
+): SubjectListItem {
+  return {
+    ...previous,
+    ...subject,
+    coverUrl: subject.coverUrl || previous?.coverUrl,
+    episodeTotal: subject.episodeTotal || previous?.episodeTotal,
+    nsfw: subject.nsfw ?? previous?.nsfw,
+    tags: subject.tags.length ? subject.tags : previous?.tags ?? [],
+    metaTags: subject.metaTags.length ? subject.metaTags : previous?.metaTags ?? [],
+  };
 }
 
 export async function loadSubjectSchedule(

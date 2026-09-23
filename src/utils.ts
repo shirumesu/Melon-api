@@ -133,13 +133,8 @@ export function pickImage(
     grid?: string;
   } | null,
 ): string | undefined {
-  return (
-    images?.common ??
-    images?.medium ??
-    images?.large ??
-    images?.small ??
-    images?.grid
-  );
+  return [images?.common, images?.medium, images?.large, images?.small, images?.grid]
+    .find((value) => value != null && value.trim().length > 0);
 }
 
 export function positiveNumber(value: unknown): number | undefined {

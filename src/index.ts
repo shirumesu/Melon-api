@@ -525,6 +525,10 @@ async function refreshMaterializedCaches(env: Env): Promise<void> {
   ]);
 }
 
+function hasMissingScheduleCovers(value: ScheduleResponse): boolean {
+  return value.items.some((item) => item.subjectId != null && !item.coverUrl);
+}
+
 async function getScheduleCached(
   url: URL,
   env: Env,
@@ -555,7 +559,11 @@ async function getScheduleCached(
     env,
     cacheKey(keyParts),
     {
-      ttlSeconds: 24 * 60 * 60,
+      ttlSeconds: (value: ScheduleResponse) =>
+        hasMissingScheduleCovers(value) ? 5 * 60 : 24 * 60 * 60,
+      // The client already displays its saved list during this request. Return
+      // repaired artwork in this response instead of another incomplete snapshot.
+      canServeStale: (value: ScheduleResponse) => !hasMissingScheduleCovers(value),
       force,
       staleWhileRevalidateSeconds: 24 * 60 * 60,
     },

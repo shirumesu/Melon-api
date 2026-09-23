@@ -10,8 +10,9 @@ export type Env = {
   PUBLIC_BASE_URL?: string;
 };
 
-export type CachePolicy = {
-  ttlSeconds: number;
+export type CachePolicy<T = unknown> = {
+  ttlSeconds: number | ((value: T) => number);
+  canServeStale?: (value: T) => boolean;
   force?: boolean;
   staleWhileRevalidateSeconds?: number;
 };

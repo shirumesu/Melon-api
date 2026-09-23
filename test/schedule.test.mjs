@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { writeJson } from "../src/cache.ts";
+import { pickImage } from "../src/utils.ts";
 import worker from "../src/index.ts";
 
 const env = { BANGUMI_API_BASE: "https://api.schedule.test", BANGUMI_DATA_SOURCE: "https://data.schedule.test/rules.json" };
@@ -50,7 +51,7 @@ test("one unavailable subject does not discard other timetable covers and succes
 
 test("calendar route forwards background refresh and returns expired schedule immediately", async (t) => {
   const date = "2026-01-17";
-  const saved = { generatedAt: "2026-01-17T00:00:00Z", centerDate: date, days: 0, items: [{ subjectId: 97777, displayName: "Saved title" }], byDate: {} };
+  const saved = { generatedAt: "2026-01-17T00:00:00Z", centerDate: date, days: 0, items: [{ subjectId: 97777, displayName: "Saved title", coverUrl: "https://images.test/saved.jpg" }], byDate: {} };
   await writeJson({}, `schedule-v2/${date}/0/false`, {
     value: saved,
     cachedAt: new Date(Date.now() - 60_000).toISOString(),
@@ -83,4 +84,93 @@ test("calendar route forwards background refresh and returns expired schedule im
     gate.resolve();
     await Promise.all(tasks);
   }
+});
+
+
+test("legacy fresh but incomplete schedules are repaired in the same response after five minutes", async (t) => {
+  const date = "2026-02-20";
+  const id = 633836;
+  const key = `schedule-v2/${date}/0/false`;
+  await writeJson({}, key, {
+    value: { generatedAt: date, centerDate: date, days: 0, items: [{ subjectId: id, needsFallback: { cover: true } }], byDate: {} },
+    cachedAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+    expiresAt: new Date(Date.now() + 23 * 60 * 60_000).toISOString(),
+  });
+  // An old incomplete brief must not prevent a retry either.
+  await writeJson({}, `subjects/${id}/brief`, {
+    value: { subjectId: id, displayName: "Incomplete", tags: [], metaTags: [] },
+    cachedAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+    expiresAt: new Date(Date.now() + 50 * 60_000).toISOString(),
+  });
+  const gate = Promise.withResolvers();
+  let lookups = 0;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/repair-rules.json") return Response.json({ items: [entry(id)] });
+    if (url.pathname === "/calendar") return Response.json([]);
+    if (url.pathname === "/v0/search/subjects") return Response.json({ data: [] });
+    assert.equal(url.pathname, `/v0/subjects/${id}`);
+    lookups++;
+    await gate.promise;
+    return Response.json(subject(id, "Recovered artwork"));
+  });
+  let completed = false;
+  const request = () => worker.fetch(new Request(`https://melon.test/v1/schedule/latest?days=0&date=${date}`),
+    { ...env, BANGUMI_DATA_SOURCE: "https://data.schedule.test/repair-rules.json" }, context);
+  const loading = request().then((response) => { completed = true; return response.json(); });
+  await setImmediate();
+  assert.equal(completed, false, "Incomplete cache must not return again while repair runs");
+  gate.resolve();
+  const body = await loading;
+  assert.equal(body.items[0].coverUrl, `https://images.test/${id}.jpg`);
+  assert.equal(body.byDate[date][0].needsFallback.cover, false);
+  assert.equal(body.cache.stale, undefined);
+  assert.equal(body.cache.hit, false);
+  const cached = await (await request()).json();
+  assert.equal(cached.items[0].coverUrl, body.items[0].coverUrl);
+  assert.equal(cached.cache.hit, true);
+  assert.equal(lookups, 1);
+});
+
+test("sparse seasonal results cannot erase calendar artwork", async (t) => {
+  const id = 633837;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/merge-rules.json") return Response.json({ items: [entry(id)] });
+    if (url.pathname === "/calendar") return Response.json([{ items: [subject(id, "Calendar artwork")] }]);
+    if (url.pathname === "/v0/search/subjects") return Response.json({ data: [subject(id, "Season without artwork", false)] });
+    assert.fail(`Complete merged metadata needs no fallback: ${url.pathname}`);
+  });
+  const response = await worker.fetch(new Request("https://melon.test/v1/schedule/latest?date=2026-04-20&days=0&force=1", {
+    headers: { authorization: "Bearer test-admin" },
+  }), { ...env, ADMIN_TOKEN: "test-admin", BANGUMI_DATA_SOURCE: "https://data.schedule.test/merge-rules.json" }, context);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.items[0].coverUrl, `https://images.test/${id}.jpg`);
+  assert.equal(body.items[0].needsFallback.cover, false);
+});
+
+
+test("an unavailable fallback keeps the row with a short retry lifetime", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/unavailable-rules.json") return Response.json({ items: [entry(633838)] });
+    if (url.pathname === "/calendar") return Response.json([]);
+    if (url.pathname === "/v0/search/subjects") return Response.json({ data: [] });
+    return new Response("Unavailable", { status: 404 });
+  });
+  const response = await worker.fetch(new Request("https://melon.test/v1/schedule/latest?date=2026-05-20&days=0&force=1", {
+    headers: { authorization: "Bearer test-admin" },
+  }), { ...env, ADMIN_TOKEN: "test-admin", BANGUMI_DATA_SOURCE: "https://data.schedule.test/unavailable-rules.json" }, context);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.items[0].subjectId, 633838);
+  assert.equal(body.items[0].needsFallback.cover, true);
+  assert.equal(Date.parse(body.cache.expiresAt) - Date.parse(body.cache.cachedAt), 5 * 60_000);
+});
+
+
+test("empty preferred image sizes fall through to usable artwork", () => {
+  assert.equal(pickImage({ common: "", medium: "  ", large: "https://images.test/large.jpg" }), "https://images.test/large.jpg");
 });

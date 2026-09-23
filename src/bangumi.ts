@@ -212,7 +212,11 @@ export class BangumiClient {
         return (await getOrSetJson(
           this.env,
           cacheKey(["subjects", subjectId, "brief"]),
-          { ttlSeconds: 60 * 60, force },
+          {
+            ttlSeconds: (value: SubjectListItem) =>
+              value.coverUrl ? 60 * 60 : 5 * 60,
+            force,
+          },
           () => this.getSubject(subjectId),
           background,
         )).value;
