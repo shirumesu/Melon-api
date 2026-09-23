@@ -132,7 +132,7 @@ custom_domain = true
 
 ```bash
 pnpm install
-pnpm deploy
+pnpm run deploy
 ```
 
 或直接使用 wrangler：
