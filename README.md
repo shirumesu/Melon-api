@@ -25,6 +25,8 @@
 * **GET** `/v1/subjects/search?q={name}`  
   根据关键词搜索番剧
 
+默认每页 10 条，使用 `limit` 和 `offset` 分页；最大 `limit=100`。
+
 ### 热门与新番
 
 * **GET** `/v1/trending/current`  
@@ -37,6 +39,8 @@
 
 * **GET** `/v1/schedule/today`  
   今日放送时间表
+
+默认仅构建当天（`days=0`），不等待前后 7 天其他条目的资料补全。
 
 * **GET** `/v1/schedule/latest?days=7`  
   最近 7 天放送时间表
@@ -58,8 +62,16 @@ GET /v1/subjects/531063
 不等待评论与讨论网页抓取；`comments` 和 `topics` 返回空数组。
 需要评论时再请求 `/v1/subjects/{id}/comments` 或 `/v1/subjects/{id}/topics`。
 完整详情的 `aliases` 返回按 Bangumi subjectId 关联的 bangumi-data 原名及地区译名（含繁体名称），
-与放送规则共用上游缓存；数据缺失或不可用时返回空数组，不猜测译名。
+与放送规则共用上游缓存；确无匹配数据时返回空数组，不猜测译名。上游请求失败会终止详情聚合。
 不传该参数的默认行为不变；`full=false` 仍返回简略条目。
+
+同一详情接口支持 `Accept: application/x-ndjson`，建议搭配 `includeHtml=false`。
+冷请求先发送 `snapshot`（完整详情形状的当前数据及 `pending` 分区名），
+随后每个分区可用时发送 `patch`（`data` 只包含该分区，`pending` 随之减少），
+最终发送含完整 `data` 和 `cache` 的 `complete`。缓存命中直接发送 `complete`。
+`pending` 中的空数组表示仍在加载，移除后才表示已确认结果；章节可用后可先展示。
+结构化分区失败会发送 `error`，不能将中间结果写入完整详情缓存；
+未收到 `complete` 的连接也不能视作加载成功。JSON 客户端继续使用同一加载与缓存逻辑。
 
 ### 数据完整性与缓存
 
@@ -71,10 +83,14 @@ GET /v1/subjects/531063
 章节列表会读取所有分页，保留超过 200 话的长篇番剧；后续分页最多四个并行请求。
 
 R2 命中的数据会留在有容量限制的实例内存中，同一键的并发读取与加载共用请求。
-结构化详情、季度列表和时间表过期后，可在 24 小时内先返回带 `cache.stale=true` 的已有数据，
+搜索、结构化详情、季度列表和时间表过期后，可在 24 小时内先返回带 `cache.stale=true` 的已有数据，
 并通过 Worker `waitUntil` 刷新；客户端应结合 `cache.expiresAt` 判断服务端数据的新鲜度。
 有请求上下文时，新数据写入实例内存后即可响应，R2 持久化在后台完成。
 管理员 `force=1` 仍等待新的上游结果；默认详情的实时评论和讨论行为不变。
+每次 Bangumi 上游请求及其响应正文读取最多等待 10 秒，不重试。这是单次请求预算，
+完整详情可能因章节分页等多轮请求超过 10 秒；bangumi-data 的备用来源共用 10 秒预算。
+定时刷新改为上海时区每日午夜，分别预热今日与前后 7 天时间表，以及本季列表。
+Workers Logs 已启用，缓存读写失败和上游错误可在 Cloudflare Observability 中查看。
 
 ### 单集信息
 
@@ -94,10 +110,7 @@ GET /v1/episodes/1656040/comments
 `Workers Builds: melon-api` 中确认结果。日常发布不需要本机 Wrangler 登录。
 以下手动部署步骤适用于新实例配置或明确需要的手动恢复。
 
-本地开发使用 Node.js 22.15 或以上版本。安装依赖后运行 `pnpm test`，
-它会先检查 TypeScript 类型，再用 Node 内置测试运行器验证详情路由、
-缓存命中时跳过 HTML、默认评论兼容性、并行加载、完整章节分页、时间表封面补全和缓存刷新。测试使用模拟上游响应，
-不需要 Cloudflare 凭据或访问真实 Bangumi 服务。
+本地开发使用 Node.js 22.15 或以上版本。安装依赖后运行 `pnpm typecheck` 检查 TypeScript 类型。
 
 ### 1. 安装 Wrangler 并登录
 

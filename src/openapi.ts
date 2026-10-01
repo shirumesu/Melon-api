@@ -114,7 +114,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
               { enum: ["match", "heat", "rank", "score"], default: "match" },
             ),
             queryParam("limit", "integer", "每页数量，最大 100。", {
-              default: 20,
+              default: 10,
               maximum: 100,
               minimum: 1,
             }),
@@ -154,6 +154,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "full=false 时只返回简略 SubjectListItem，适合列表补全或低成本探测。",
             "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；默认 full=true 且 includeHtml=true 时每次响应都会实时解析并覆盖缓存详情里的 comments/topics，解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
             "includeHtml=false 跳过网页抓取，直接复用完整结构化详情缓存，保留章节、角色/声优、制作人员、关联条目与播出时间；comments/topics 为空，可通过独立接口按需获取。full=false 时此参数无效。",
+            "full=true 时可发送 Accept: application/x-ndjson，按行接收 snapshot、patch、complete 或 error 事件。pending 标记尚未完成的分区；只有 complete 表示完整成功，不能将中间 snapshot/patch 保存为完整详情。缓存命中可直接返回 complete。任一结构化分区失败会终止聚合，不缓存空分区。",
           ].join("\n\n"),
           parameters: [
             pathId("subjectId", "Bangumi subject ID。"),
@@ -167,21 +168,31 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           ],
           security: optionalBearerSecurity(),
           responses: {
-            "200": response(
-              "番剧详情",
-              objectSchema(
-                {
-                  data: {
-                    oneOf: [
-                      schemaRef("SubjectDetail"),
-                      schemaRef("SubjectListItem"),
-                    ],
-                  },
-                  cache: cacheSchema,
+            "200": {
+              description: "番剧详情",
+              content: {
+                "application/json": {
+                  schema: objectSchema(
+                    {
+                      data: {
+                        oneOf: [
+                          schemaRef("SubjectDetail"),
+                          schemaRef("SubjectListItem"),
+                        ],
+                      },
+                      cache: cacheSchema,
+                    },
+                    ["data", "cache"],
+                  ),
                 },
-                ["data", "cache"],
-              ),
-            ),
+                "application/x-ndjson": {
+                  schema: {
+                    type: "string",
+                    description: "每行一个 JSON 事件：snapshot、patch、complete 或 error。pending 标记未完成分区，只有 complete 表示完整成功。",
+                  },
+                },
+              },
+            },
             "404": errorResponse,
             "500": errorResponse,
           },
@@ -313,7 +324,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           tags: ["时间表"],
           summary: "获取今日更新",
           description:
-            "读取 /v1/schedule/latest 的缓存结果，并按上海时区今天过滤 byDate。适合首页“今日更新”模块。默认不截断数量；字段含义与 /v1/schedule/latest 的 ScheduleOccurrence 相同。",
+            "使用与 /v1/schedule/latest 相同的时间表生成与缓存逻辑，默认只构建上海时区今天（days=0）。适合首页“今日更新”模块。默认不截断数量；字段含义与 /v1/schedule/latest 的 ScheduleOccurrence 相同。",
           parameters: [
             queryParam(
               "date",
@@ -324,8 +335,8 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             queryParam(
               "days",
               "integer",
-              "用于生成缓存窗口的前后天数；默认 7。",
-              { default: 7, minimum: 0, maximum: 31 },
+              "用于生成缓存窗口的前后天数；默认 0，只构建当天。",
+              { default: 0, minimum: 0, maximum: 31 },
             ),
             queryParam(
               "requireBroadcast",
@@ -511,7 +522,7 @@ function schemas(): Record<string, unknown> {
       stale: {
         type: "boolean",
         description:
-          "是否返回了已过期的旧缓存。仅在外部数据源刷新失败且存在旧缓存时出现。",
+          "是否返回了已过期的旧缓存。后台重验或上游刷新失败时可返回已有数据。",
       },
       cachedAt: { type: "string", format: "date-time" },
       expiresAt: { type: "string", format: "date-time" },

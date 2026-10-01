@@ -121,6 +121,7 @@ export async function fetchEpisodeComments(
 
 async function fetchBangumiHtml(env: Env, path: string): Promise<string> {
   const response = await fetch(`${baseWeb(env)}${path}`, {
+    signal: AbortSignal.timeout(10_000),
     headers: {
       accept: "text/html,application/xhtml+xml",
       "user-agent": userAgent(env),

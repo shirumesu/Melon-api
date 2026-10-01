@@ -57,23 +57,23 @@ export async function buildScheduleResponse(
   const windowEnd = shanghaiDayStartUtc(
     addDaysToDateString(centerDate, input.days + 1),
   );
-  const data = await loadBangumiData(env, input.force, background);
-  const subjectIds = collectScheduleSubjectIds(
-    data.items ?? [],
-    windowStart,
-    windowEnd,
-  );
-  const enrichment = await loadScheduleEnrichment(
+  const dataLoading = loadBangumiData(env, input.force, background);
+  const enrichmentLoading = loadScheduleEnrichment(
     env,
     windowStart,
     windowEnd,
-    subjectIds,
+    dataLoading.then((data) => collectScheduleSubjectIds(
+      data.items ?? [],
+      windowStart,
+      windowEnd,
+    )),
     input.force,
     background,
   ).catch((error) => {
     console.warn("schedule enrichment unavailable", error);
     return new Map<number, SubjectListItem>();
   });
+  const [data, enrichment] = await Promise.all([dataLoading, enrichmentLoading]);
   const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
     requireBroadcast: input.requireBroadcast ?? false,
     includeNsfw: input.includeNsfw ?? false,
@@ -124,10 +124,12 @@ async function fetchBangumiData(env: Env, configured: string): Promise<BangumiDa
     "https://unpkg.com/bangumi-data@0.3/dist/data.json",
   ]);
   const errors: string[] = [];
+  const signal = AbortSignal.timeout(10_000);
 
   for (const source of sources) {
     try {
       const response = await fetch(source, {
+        signal,
         headers: {
           "user-agent": env.BANGUMI_USER_AGENT ?? "melon-api/0.1",
         },
@@ -153,14 +155,15 @@ async function loadScheduleEnrichment(
   env: Env,
   start: Date,
   end: Date,
-  subjectIds: number[],
+  requestedSubjectIds: Promise<number[]>,
   force = false,
   background?: (task: Promise<unknown>) => void,
 ): Promise<Map<number, SubjectListItem>> {
   const client = new BangumiClient(env);
   const bySubjectId = new Map<number, SubjectListItem>();
   const seasons = seasonsInWindow(start, end);
-  const [calendarSubjects, ...seasonPages] = await Promise.all([
+  const [subjectIds, calendarSubjects, ...seasonPages] = await Promise.all([
+    requestedSubjectIds,
     getOrSetJson(
       env,
       "source/calendar",

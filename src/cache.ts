@@ -28,7 +28,7 @@ export async function getOrSetJson<T>(
   env: Env,
   key: string,
   policy: CachePolicy<T>,
-  loader: () => Promise<T>,
+  loader: (foreground: boolean) => Promise<T>,
   background?: (task: Promise<unknown>) => void,
 ): Promise<CacheResult<T>> {
   let stale: CacheEnvelope<T> | null = null;
@@ -67,7 +67,7 @@ export async function getOrSetJson<T>(
       policy.staleWhileRevalidateSeconds * 1000
   ) {
     background(
-      loadFresh(env, key, policy, loader, background).catch((error) => {
+      loadFresh(env, key, policy, loader, background, false).catch((error) => {
         console.warn(`Background refresh failed for ${key}`, error);
       }),
     );
@@ -107,13 +107,14 @@ async function loadFresh<T>(
   env: Env,
   key: string,
   policy: CachePolicy<T>,
-  loader: () => Promise<T>,
+  loader: (foreground: boolean) => Promise<T>,
   background?: (task: Promise<unknown>) => void,
+  foreground = true,
 ): Promise<CacheEnvelope<T>> {
   const pending = pendingLoads.get(key);
   if (pending) return pending as Promise<CacheEnvelope<T>>;
   const loading = (async () => {
-    const value = await loader();
+    const value = await loader(foreground);
     const now = new Date();
     const ttl = typeof policy.ttlSeconds === "function"
       ? policy.ttlSeconds(value)

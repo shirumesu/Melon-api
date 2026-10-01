@@ -447,6 +447,7 @@ export class BangumiClient {
     const response = await fetch(`${baseApi(this.env)}${path}`, {
       ...init,
       headers,
+      signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) {
       const text = await response.text().catch(() => "");

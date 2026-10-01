@@ -8,7 +8,7 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
     headers.get("cache-control") ?? "public, max-age=60",
   );
   applyCorsHeaders(headers);
-  return new Response(JSON.stringify(data, null, 2), { ...init, headers });
+  return new Response(JSON.stringify(data), { ...init, headers });
 }
 
 export function preflightResponse(): Response {
@@ -79,7 +79,7 @@ export function requireAdmin(request: Request, env: Env): Response | null {
   return errorJson(401, "UNAUTHORIZED", "Missing or invalid admin token.");
 }
 
-function applyCorsHeaders(headers: Headers): void {
+export function applyCorsHeaders(headers: Headers): void {
   headers.set("access-control-allow-origin", "*");
   headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
   headers.set("access-control-allow-headers", "authorization, content-type");

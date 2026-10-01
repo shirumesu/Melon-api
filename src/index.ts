@@ -14,6 +14,7 @@ import {
 } from "./schedule";
 import type { Env, HttpError, ScheduleResponse, SubjectDetail } from "./types";
 import {
+  applyCorsHeaders,
   boolParam,
   clampInt,
   currentShanghaiDate,
@@ -93,9 +94,9 @@ async function route(
     });
 
   if (request.method === "GET" && path === "v1/subjects/search")
-    return searchSubjects(url, env);
+    return searchSubjects(url, env, ctx);
   if (request.method === "GET" && /^v1\/subjects\/\d+$/.test(path)) {
-    return getSubject(Number(path.split("/")[2]), url, env, ctx);
+    return getSubject(Number(path.split("/")[2]), url, env, ctx, request.headers.get("accept"));
   }
   if (request.method === "GET" && /^v1\/subjects\/\d+\/episodes$/.test(path)) {
     return getSubjectEpisodes(Number(path.split("/")[2]), url, env);
@@ -142,7 +143,7 @@ async function route(
   return errorJson(404, "NOT_FOUND", `No route for ${request.method} /${path}`);
 }
 
-async function searchSubjects(url: URL, env: Env): Promise<Response> {
+async function searchSubjects(url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
   const client = new BangumiClient(env);
   const input = searchInputFromUrl(url);
   const force = boolParam(url.searchParams.get("force"));
@@ -162,8 +163,9 @@ async function searchSubjects(url: URL, env: Env): Promise<Response> {
   const result = await getOrSetJson(
     env,
     key,
-    { ttlSeconds: 30 * 60, force },
+    { ttlSeconds: 30 * 60, force, staleWhileRevalidateSeconds: 24 * 60 * 60 },
     () => client.searchSubjects(input),
+    (task) => ctx.waitUntil(task),
   );
   return json({ ...result.value, cache: result.cache });
 }
@@ -173,93 +175,144 @@ async function getSubject(
   url: URL,
   env: Env,
   ctx: ExecutionContext,
+  accept: string | null,
 ): Promise<Response> {
   const full = !["0", "false"].includes(url.searchParams.get("full") ?? "");
   const includeHtml = full &&
     !["0", "false"].includes(url.searchParams.get("includeHtml") ?? "");
   const force = boolParam(url.searchParams.get("force"));
-  const key = cacheKey(["subjects", subjectId, full ? "full-v3" : "brief"]);
-  const result = await getOrSetJson(
-    env,
-    key,
-    {
-      ttlSeconds: full ? 6 * 60 * 60 : 60 * 60,
-      force,
-      staleWhileRevalidateSeconds: 24 * 60 * 60,
-    },
-    async () => {
-      const client = new BangumiClient(env);
-      if (!full) return client.getSubject(subjectId);
-
-      const notes: string[] = [];
-      const [
-        subject,
-        episodes,
-        characters,
-        staff,
-        relatedSubjects,
-        aliases,
-        schedule,
-      ] = await Promise.all([
-        client.getSubjectRaw(subjectId),
-        client.getEpisodes(subjectId).catch((error) => {
-          notes.push(note("episodes", error));
-          return [];
-        }),
-        client.getCharacters(subjectId).catch((error) => {
-          notes.push(note("characters", error));
-          return [];
-        }),
-        client.getPersons(subjectId).catch((error) => {
-          notes.push(note("staff", error));
-          return [];
-        }),
-        client.getRelatedSubjects(subjectId).catch((error) => {
-          notes.push(note("relatedSubjects", error));
-          return [];
-        }),
-        loadSubjectAliases(env, subjectId, force, (task) => ctx.waitUntil(task)).catch((error) => {
-          notes.push(note("aliases", error));
-          return [];
-        }),
-        loadSubjectSchedule(
-          env,
+  const key = cacheKey(["subjects", subjectId, full ? "full-v4" : "brief"]);
+  const streaming = full && accept?.split(",").some(
+    (entry) => entry.trim().split(";")[0] === "application/x-ndjson",
+  );
+  const load = async (progress?: (event: SubjectDetailProgress) => void) => {
+    const result = await getOrSetJson(
+      env,
+      key,
+      {
+        ttlSeconds: full ? 6 * 60 * 60 : 60 * 60,
+        force,
+        staleWhileRevalidateSeconds: 24 * 60 * 60,
+      },
+      async (foreground) => {
+        const client = new BangumiClient(env);
+        if (!full) return client.getSubject(subjectId);
+        return loadSubjectDetail(subjectId, url, env, ctx, force, client, foreground ? progress : undefined);
+      },
+      includeHtml ? undefined : (task) => ctx.waitUntil(task),
+    );
+    const data = includeHtml
+      ? await withLiveSubjectHtmlParts(
+          result.value as SubjectDetail,
           subjectId,
-          url.searchParams.get("date") ?? undefined,
-          force,
-          (task) => ctx.waitUntil(task),
-        ).catch((error) => {
-          notes.push(note("schedule", error));
-          return null;
-        }),
-      ]);
-
-      const detail: SubjectDetail = client.mapSubjectDetail(subject, {
-        episodes,
-        characters,
-        staff,
-        relatedSubjects,
-        comments: [],
-        topics: [],
-        notes,
-      });
-      detail.aliases = aliases;
-      detail.schedule = schedule ?? fallbackScheduleFromAirDate(detail.airDate);
-      return detail;
-    },
-    includeHtml ? undefined : (task) => ctx.waitUntil(task),
-  );
-  const data = includeHtml
-    ? await withLiveSubjectHtmlParts(
-        result.value as SubjectDetail,
-        subjectId,
-        env,
-      )
-    : result.value;
+          env,
+        )
+      : result.value;
+    return { data, cache: result.cache };
+  };
+  if (streaming) {
+    return subjectDetailStream(async (send) => {
+      const result = await load(send);
+      send({ type: "complete", ...result });
+    });
+  }
   return json(
-    { data, cache: result.cache },
-    includeHtml ? { headers: { "cache-control": "no-store" } } : {},
+    await load(),
+    { headers: includeHtml ? { "cache-control": "no-store", vary: "Accept" } : { vary: "Accept" } },
   );
+}
+
+type SubjectDetailPart = "episodes" | "characters" | "staff" | "relatedSubjects" | "aliases" | "schedule";
+type SubjectDetailParts = Pick<SubjectDetail, SubjectDetailPart>;
+type SubjectDetailProgress =
+  | { type: "snapshot"; data: SubjectDetail; pending: SubjectDetailPart[] }
+  | { type: "patch"; data: { [K in SubjectDetailPart]?: SubjectDetail[K] | null }; pending: SubjectDetailPart[] };
+
+async function loadSubjectDetail(
+  subjectId: number,
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+  force: boolean,
+  client: BangumiClient,
+  progress?: (event: SubjectDetailProgress) => void,
+): Promise<SubjectDetail> {
+  const pending = new Set<SubjectDetailPart>([
+    "episodes", "characters", "staff", "relatedSubjects", "aliases", "schedule",
+  ]);
+  const parts: SubjectDetailParts = {
+    episodes: [], characters: [], staff: [], relatedSubjects: [], aliases: [], schedule: undefined,
+  };
+  let snapshotSent = false;
+  const assemble = (subject: Awaited<ReturnType<BangumiClient["getSubjectRaw"]>>) => {
+    const detail = client.mapSubjectDetail(subject, {
+      ...parts, comments: [], topics: [], notes: [],
+    });
+    detail.aliases = parts.aliases;
+    detail.schedule = parts.schedule ?? fallbackScheduleFromAirDate(detail.airDate);
+    return detail;
+  };
+  const ready = <K extends SubjectDetailPart>(part: K, value: SubjectDetailParts[K]) => {
+    parts[part] = value;
+    pending.delete(part);
+    if (snapshotSent) {
+      progress?.({ type: "patch", data: { [part]: value ?? null }, pending: [...pending] });
+    }
+  };
+  const [subject] = await Promise.all([
+    client.getSubjectRaw(subjectId).then((subject) => {
+      progress?.({ type: "snapshot", data: assemble(subject), pending: [...pending] });
+      snapshotSent = true;
+      return subject;
+    }),
+    client.getEpisodes(subjectId).then((value) => ready("episodes", value)),
+    client.getCharacters(subjectId).then((value) => ready("characters", value)),
+    client.getPersons(subjectId).then((value) => ready("staff", value)),
+    client.getRelatedSubjects(subjectId).then((value) => ready("relatedSubjects", value)),
+    loadSubjectAliases(env, subjectId, force, (task) => ctx.waitUntil(task))
+      .then((value) => ready("aliases", value)),
+    loadSubjectSchedule(
+      env, subjectId, url.searchParams.get("date") ?? undefined, force, (task) => ctx.waitUntil(task),
+    ).then((value) => ready("schedule", value)),
+  ]);
+  return assemble(subject);
+}
+
+function subjectDetailStream(
+  produce: (send: (event: SubjectDetailProgress | { type: "complete"; data: unknown; cache: unknown }) => void) => Promise<void>,
+): Response {
+  const encoder = new TextEncoder();
+  let open = true;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (event: unknown) => {
+        if (open) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+      void produce(send).then(() => {
+        if (open) {
+          open = false;
+          controller.close();
+        }
+      }, (error: unknown) => {
+        console.error(error);
+        send({ type: "error", error: { message: error instanceof Error ? error.message : "Unknown error" } });
+        if (open) {
+          open = false;
+          controller.close();
+        }
+      });
+    },
+    cancel() {
+      open = false;
+    },
+  });
+  const headers = new Headers({
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+    "vary": "Accept",
+  });
+  applyCorsHeaders(headers);
+  return new Response(body, { headers });
 }
 
 async function withLiveSubjectHtmlParts(
@@ -445,7 +498,7 @@ async function getTodaySchedule(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const schedule = await getScheduleCached(url, env, false, ctx);
+  const schedule = await getScheduleCached(url, env, false, ctx, 0);
   const today = currentShanghaiDate();
   return json({
     generatedAt: schedule.value.generatedAt,
@@ -522,6 +575,7 @@ async function refreshMaterializedCaches(env: Env): Promise<void> {
   const origin = new URL("https://melon-api.local?force=1");
   const seasonUrl = new URL("https://melon-api.local?force=1");
   await Promise.all([
+    getScheduleCached(origin, env, true, undefined, 0),
     getScheduleCached(origin, env, true),
     getSeason(seasonUrl, env, "current"),
     getSeason(seasonUrl, env, "trending"),
@@ -541,8 +595,9 @@ async function getScheduleCached(
   env: Env,
   forceOverride = false,
   ctx?: ExecutionContext,
+  defaultDays = 7,
 ): Promise<Awaited<ReturnType<typeof getOrSetJson<ScheduleResponse>>>> {
-  const days = clampInt(url.searchParams.get("days"), 7, 0, 31);
+  const days = clampInt(url.searchParams.get("days"), defaultDays, 0, 31);
   const date = url.searchParams.get("date") ?? currentShanghaiDate();
   const requireBroadcast = boolParam(url.searchParams.get("requireBroadcast"));
   const includeNsfw = boolParam(url.searchParams.get("includeNsfw"));
@@ -587,7 +642,7 @@ async function getScheduleCached(
 function searchInputFromUrl(url: URL): SearchInput {
   return {
     q: url.searchParams.get("q") ?? "",
-    limit: clampInt(url.searchParams.get("limit"), 20, 1, 100),
+    limit: clampInt(url.searchParams.get("limit"), 10, 1, 100),
     offset: clampInt(url.searchParams.get("offset"), 0, 0, 5000),
     sort: normalizeSort(url.searchParams.get("sort")) ?? "match",
     tags: readListParam(url, "tag"),

@@ -22,11 +22,9 @@ bucket_name = "melon-api-cache"
 # database_name = "melon-api-index"
 # database_id = ""
 
-# Logging:
-#
-# [observability]
-# enabled = true
-# head_sampling_rate = 1
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [triggers]
-crons = ["0 0 * * *"]
+crons = ["0 16 * * *"]
