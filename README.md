@@ -159,7 +159,7 @@ pnpm run deploy
 wrangler deploy
 ```
 
-### 5.（可选）本地开发测试
+### 5.（可选）本地开发
 
 ```bash
 pnpm dev
