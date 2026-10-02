@@ -6,6 +6,7 @@ import {
   fetchSubjectTopics,
 } from "./html";
 import { docsHtml, openApiSpec } from "./openapi";
+import { sourceRules } from "./sources";
 import {
   buildScheduleResponse,
   fallbackScheduleFromAirDate,
@@ -80,6 +81,8 @@ async function route(
     return json({ name: "melon-api", docs: "/docs", openapi: "/openapi.json" });
   if (path === "health")
     return json({ ok: true, now: new Date().toISOString() });
+  if (path === "sources/rules" && request.method === "GET")
+    return sourceRules(request, url);
   if (path === "docs") {
     return new Response(docsHtml(), {
       headers: {

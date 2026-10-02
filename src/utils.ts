@@ -82,7 +82,7 @@ export function requireAdmin(request: Request, env: Env): Response | null {
 export function applyCorsHeaders(headers: Headers): void {
   headers.set("access-control-allow-origin", "*");
   headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
-  headers.set("access-control-allow-headers", "authorization, content-type");
+  headers.set("access-control-allow-headers", "authorization, content-type, if-none-match");
 }
 
 function constantTimeEqual(left: string, right: string): boolean {

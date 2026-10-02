@@ -20,6 +20,13 @@
 * **GET** `/health`  
   接口健康状态检查
 
+### 在线来源规则
+
+* **GET** `/sources/rules?engine=1`  
+  返回维护者管理的声明式视频源规则；支持 `If-None-Match` / `ETag`，未变化时返回 304。
+  `minEngine` 超过客户端版本的规则仍返回，供客户端显示更新提示。
+  规则保存在 `src/source-rules.json`，不包含执行脚本，也不在服务端探测来源。
+
 ### 番剧搜索
 
 * **GET** `/v1/subjects/search?q={name}`  
