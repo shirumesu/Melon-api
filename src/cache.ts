@@ -4,9 +4,10 @@ type CacheEnvelope<T> = {
   value: T;
   cachedAt: string;
   expiresAt: string;
+  revision?: string;
 };
 
-type CacheResult<T> = {
+export type CacheResult<T> = {
   value: T;
   cache: {
     key: string;
@@ -14,13 +15,18 @@ type CacheResult<T> = {
     cachedAt: string;
     expiresAt: string;
     stale?: boolean;
+    etag: string;
   };
 };
 
 const memoryCache = new Map<string, CacheEnvelope<unknown>>();
 const pendingReads = new Map<string, Promise<CacheEnvelope<unknown> | null>>();
 const pendingLoads = new Map<string, Promise<CacheEnvelope<unknown>>>();
+const pendingWrites = new Map<string, Promise<unknown>>();
 const MAX_MEMORY_CACHE_ENTRIES = 256;
+const MAX_MEMORY_CACHE_BYTES = 24 * 1024 * 1024;
+const memorySizes = new Map<string, number>();
+let memoryBytes = 0;
 const MAX_DELETE_BATCH_SIZE = 1000;
 const DEFAULT_STALE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 
@@ -77,7 +83,9 @@ export async function getOrSetJson<T>(
     const fresh = await loadFresh(env, key, policy, loader, background);
     return result(key, fresh, false);
   } catch (error) {
-    if (stale) {
+    if (stale && Date.now() - Date.parse(stale.expiresAt) <=
+        (policy.maxStaleSeconds ?? DEFAULT_STALE_RETENTION_SECONDS) * 1000 &&
+        (policy.canServeStale?.(stale.value) ?? true)) {
       console.warn(`Loader failed for ${key}; returning stale cache`, error);
       return result(key, stale, true, true);
     }
@@ -98,6 +106,7 @@ function result<T>(
       hit,
       cachedAt: envelope.cachedAt,
       expiresAt: envelope.expiresAt,
+      etag: cacheEtag(key, envelope.cachedAt, envelope.revision),
       ...(stale ? { stale: true } : {}),
     },
   };
@@ -180,22 +189,77 @@ export async function writeJson<T>(
   key: string,
   envelope: CacheEnvelope<T>,
 ): Promise<void> {
+  envelope.revision ??= crypto.randomUUID();
   remember(key, envelope);
   if (!env.CACHE_BUCKET) return;
-  await env.CACHE_BUCKET.put(key, JSON.stringify(envelope), {
+  const stored = JSON.stringify(envelope);
+  const previous = pendingWrites.get(key) ?? Promise.resolve();
+  const writing = previous.catch(() => {}).then(() => env.CACHE_BUCKET!.put(key, stored, {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { cachedAt: envelope.cachedAt, expiresAt: envelope.expiresAt },
-  });
+  }));
+  pendingWrites.set(key, writing);
+  try {
+    await writing;
+  } finally {
+    if (pendingWrites.get(key) === writing) pendingWrites.delete(key);
+  }
 }
 
 function remember(key: string, envelope: CacheEnvelope<unknown>): void {
-  memoryCache.delete(key);
+  if (memoryCache.get(key) === envelope) {
+    memoryCache.delete(key);
+    memoryCache.set(key, envelope);
+    return;
+  }
+  forget(key);
+  const bytes = new TextEncoder().encode(JSON.stringify(envelope)).byteLength;
+  if (bytes > MAX_MEMORY_CACHE_BYTES) return;
   memoryCache.set(key, envelope);
-  while (memoryCache.size > MAX_MEMORY_CACHE_ENTRIES) {
+  memorySizes.set(key, bytes);
+  memoryBytes += bytes;
+  while (memoryCache.size > MAX_MEMORY_CACHE_ENTRIES || memoryBytes > MAX_MEMORY_CACHE_BYTES) {
     const oldest = memoryCache.keys().next().value;
     if (oldest === undefined) break;
-    memoryCache.delete(oldest);
+    forget(oldest);
   }
+}
+
+function forget(key: string): void {
+  memoryBytes -= memorySizes.get(key) ?? 0;
+  memorySizes.delete(key);
+  memoryCache.delete(key);
+}
+
+export function cacheEtag(key: string, cachedAt: string, revision?: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i++) hash = Math.imul(hash ^ key.charCodeAt(i), 16777619);
+  return `W/"${revision ?? `${(hash >>> 0).toString(36)}-${Date.parse(cachedAt).toString(36)}`}"`;
+}
+
+export function cacheHeaders(cache: CacheResult<unknown>["cache"]): Record<string, string> {
+  return {
+    etag: cache.etag,
+    "x-cache-expires-at": cache.expiresAt,
+    "x-cache-stale": String(cache.stale === true),
+  };
+}
+
+export function matchesEtag(request: Request, etag: string): boolean {
+  return request.headers.get("if-none-match")?.split(",").some(
+    (value) => value.trim().replace(/^W\//, "") === etag.replace(/^W\//, "") || value.trim() === "*",
+  ) ?? false;
+}
+
+export function queryCacheKey(namespace: string, values: Record<string, unknown>): string {
+  const normalized = Object.fromEntries(Object.keys(values).sort().map((key) => [key,
+    Array.isArray(values[key]) ? [...new Set(values[key] as unknown[])].sort() : values[key],
+  ]));
+  return cacheKey([namespace, JSON.stringify(normalized)]);
+}
+
+export async function waitForCacheLoad(key: string): Promise<void> {
+  await pendingLoads.get(key);
 }
 
 export function cacheKey(
@@ -220,18 +284,22 @@ export async function cleanupExpiredCacheObjects(
   const maxDeletes = options.maxDeletes ?? MAX_DELETE_BATCH_SIZE;
   const staleRetentionMs =
     (options.staleRetentionSeconds ?? DEFAULT_STALE_RETENTION_SECONDS) * 1000;
-  let cursor: string | undefined;
+  const cursorKey = "maintenance/cleanup-cursor";
+  const savedCursor = await env.CACHE_BUCKET.get(cursorKey);
+  let nextCursor = (await savedCursor?.json<{ cursor?: string }>())?.cursor;
+  let pages = 0;
   let scanned = 0;
   let deleted = 0;
   let truncated = false;
 
   do {
     const listed = await env.CACHE_BUCKET.list({
-      cursor,
+      cursor: nextCursor,
       include: ["customMetadata"],
       limit: MAX_DELETE_BATCH_SIZE,
     });
     scanned += listed.objects.length;
+    pages++;
 
     const expiredKeys = listed.objects
       .filter((object) =>
@@ -243,12 +311,14 @@ export async function cleanupExpiredCacheObjects(
     if (expiredKeys.length > 0) {
       await env.CACHE_BUCKET.delete(expiredKeys);
       deleted += expiredKeys.length;
-      for (const key of expiredKeys) memoryCache.delete(key);
+      for (const key of expiredKeys) forget(key);
     }
 
     truncated = listed.truncated;
-    cursor = listed.cursor;
-  } while (truncated && deleted < maxDeletes);
+    nextCursor = listed.cursor;
+  } while (truncated && deleted < maxDeletes && pages < 5);
+
+  await env.CACHE_BUCKET.put(cursorKey, JSON.stringify({ cursor: truncated ? nextCursor : undefined }));
 
   return { scanned, deleted, truncated };
 }

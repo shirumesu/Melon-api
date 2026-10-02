@@ -18,6 +18,23 @@ import {
 
 const MS_DAY = 24 * 60 * 60 * 1000;
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+const subjectIndexes = new WeakMap<BangumiData, Map<number, BangumiDataItem[]>>();
+
+function subjectItems(data: BangumiData, subjectId: number): BangumiDataItem[] {
+  let index = subjectIndexes.get(data);
+  if (!index) {
+    index = new Map();
+    for (const item of data.items ?? []) {
+      const id = subjectIdFromSites(item.sites ?? []);
+      if (id == null) continue;
+      const entries = index.get(id) ?? [];
+      entries.push(item);
+      index.set(id, entries);
+    }
+    subjectIndexes.set(data, index);
+  }
+  return index.get(subjectId) ?? [];
+}
 
 type BangumiData = {
   items?: BangumiDataItem[];
@@ -43,19 +60,22 @@ export async function buildScheduleResponse(
   input: {
     days: number;
     date?: string;
+    startDate?: string;
+    dayCount?: number;
     force?: boolean;
     requireBroadcast?: boolean;
     includeNsfw?: boolean;
     includeUnknownNsfw?: boolean;
   },
   background?: (task: Promise<unknown>) => void,
+  onRepair?: (value: ScheduleResponse) => Promise<void>,
 ): Promise<ScheduleResponse> {
-  const centerDate = input.date ?? currentShanghaiDate();
+  const centerDate = input.startDate ?? input.date ?? currentShanghaiDate();
   const windowStart = shanghaiDayStartUtc(
-    addDaysToDateString(centerDate, -input.days),
+    input.startDate ?? addDaysToDateString(centerDate, -input.days),
   );
   const windowEnd = shanghaiDayStartUtc(
-    addDaysToDateString(centerDate, input.days + 1),
+    input.startDate ? addDaysToDateString(input.startDate, input.dayCount ?? 7) : addDaysToDateString(centerDate, input.days + 1),
   );
   const dataLoading = loadBangumiData(env, input.force, background);
   const enrichmentLoading = loadScheduleEnrichment(
@@ -69,35 +89,32 @@ export async function buildScheduleResponse(
     )),
     input.force,
     background,
+    onRepair ? async (enrichment) => onRepair(assemble(await dataLoading, enrichment)) : undefined,
   ).catch((error) => {
     console.warn("schedule enrichment unavailable", error);
     return new Map<number, SubjectListItem>();
   });
   const [data, enrichment] = await Promise.all([dataLoading, enrichmentLoading]);
-  const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
-    requireBroadcast: input.requireBroadcast ?? false,
-    includeNsfw: input.includeNsfw ?? false,
-    includeUnknownNsfw: input.includeUnknownNsfw ?? true,
-    enrichment,
-  });
-  const byDate: Record<string, ScheduleOccurrence[]> = {};
-  for (const item of items) {
-    const date = item.airingAtShanghai.slice(0, 10);
-    byDate[date] ??= [];
-    byDate[date].push(item);
+  return assemble(data, enrichment);
+  function assemble(data: BangumiData, enrichment: Map<number, SubjectListItem>): ScheduleResponse {
+    const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
+      requireBroadcast: input.requireBroadcast ?? false,
+      includeNsfw: input.includeNsfw ?? false,
+      includeUnknownNsfw: input.includeUnknownNsfw ?? true,
+      enrichment,
+    });
+    return {
+      generatedAt: new Date().toISOString(),
+      centerDate,
+      days: input.days,
+      ...(input.startDate ? { startDate: input.startDate, dayCount: input.dayCount ?? 7 } : {}),
+      window: {
+        start: formatInShanghai(windowStart),
+        endExclusive: formatInShanghai(windowEnd),
+      },
+      items,
+    };
   }
-
-  return {
-    generatedAt: new Date().toISOString(),
-    centerDate,
-    days: input.days,
-    window: {
-      start: formatInShanghai(windowStart),
-      endExclusive: formatInShanghai(windowEnd),
-    },
-    items,
-    byDate,
-  };
 }
 
 export async function loadBangumiData(
@@ -158,8 +175,9 @@ async function loadScheduleEnrichment(
   requestedSubjectIds: Promise<number[]>,
   force = false,
   background?: (task: Promise<unknown>) => void,
+  onRepair?: (enrichment: Map<number, SubjectListItem>) => Promise<void>,
 ): Promise<Map<number, SubjectListItem>> {
-  const client = new BangumiClient(env);
+  const client = new BangumiClient(env, AbortSignal.timeout(15_000));
   const bySubjectId = new Map<number, SubjectListItem>();
   const seasons = seasonsInWindow(start, end);
   const [subjectIds, calendarSubjects, ...seasonPages] = await Promise.all([
@@ -213,9 +231,18 @@ async function loadScheduleEnrichment(
     const subject = bySubjectId.get(id);
     return !subject?.coverUrl || !subject.episodeTotal || subject.nsfw == null;
   });
-  for (const subject of await client.getSubjectsByIds(missing, force, background)) {
-    const previous = bySubjectId.get(subject.subjectId);
-    bySubjectId.set(subject.subjectId, mergeScheduleSubject(previous, subject));
+  const repair = async (repairClient: BangumiClient) => {
+    for (const subject of await repairClient.getSubjectsByIds(missing, force, background)) {
+      const previous = bySubjectId.get(subject.subjectId);
+      bySubjectId.set(subject.subjectId, mergeScheduleSubject(previous, subject));
+    }
+  };
+  if (missing.length && background && onRepair) {
+    background(repair(new BangumiClient(env, AbortSignal.timeout(25_000)))
+      .then(() => onRepair(bySubjectId))
+      .catch((error) => console.warn("Schedule artwork repair failed", error)));
+  } else {
+    await repair(client);
   }
   return bySubjectId;
 }
@@ -242,8 +269,7 @@ export async function loadSubjectAliases(
   background?: (task: Promise<unknown>) => void,
 ): Promise<string[]> {
   const data = await loadBangumiData(env, force, background);
-  const names = (data.items ?? [])
-    .filter((item) => subjectIdFromSites(pickSites(item.sites ?? [])) === subjectId)
+  const names = subjectItems(data, subjectId)
     .flatMap((item) => [item.title, ...Object.values(item.titleTranslate ?? {}).flat()]);
   return unique(names.map((name) => name.trim()).filter(Boolean));
 }
@@ -256,9 +282,7 @@ export async function loadSubjectSchedule(
   background?: (task: Promise<unknown>) => void,
 ): Promise<SubjectSchedule | undefined> {
   const data = await loadBangumiData(env, force, background);
-  const matching = (data.items ?? []).filter(
-    (item) => subjectIdFromSites(pickSites(item.sites ?? [])) === subjectId,
-  );
+  const matching = subjectItems(data, subjectId);
   const occurrences = buildSchedule(
     matching,
     shanghaiDayStartUtc(addDaysToDateString(date, -7)),

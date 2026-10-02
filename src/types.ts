@@ -15,6 +15,7 @@ export type CachePolicy<T = unknown> = {
   canServeStale?: (value: T) => boolean;
   force?: boolean;
   staleWhileRevalidateSeconds?: number;
+  maxStaleSeconds?: number;
 };
 
 export type Paged<T> = {
@@ -22,6 +23,7 @@ export type Paged<T> = {
   limit: number;
   offset: number;
   hasMore: boolean;
+  nextOffset?: number;
   data: T[];
 };
 
@@ -230,12 +232,14 @@ export type ScheduleResponse = {
   generatedAt: string;
   centerDate: string;
   days: number;
+  startDate?: string;
+  dayCount?: number;
   window: {
     start: string;
     endExclusive: string;
   };
   items: ScheduleOccurrence[];
-  byDate: Record<string, ScheduleOccurrence[]>;
+  byDate?: Record<string, ScheduleOccurrence[]>;
 };
 
 export type SeasonInfo = {
@@ -275,6 +279,7 @@ export class HttpError extends Error {
     readonly code: string,
     message: string,
     readonly details?: unknown,
+    readonly retryAfter?: string,
   ) {
     super(message);
   }

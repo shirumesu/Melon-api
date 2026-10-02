@@ -1,4 +1,4 @@
-import type { ApiError, Env, SeasonInfo } from "./types";
+import { HttpError, type ApiError, type Env, type SeasonInfo } from "./types";
 
 export function json(data: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
@@ -33,31 +33,41 @@ export function clampInt(
   min: number,
   max: number,
 ): number {
-  const parsed = Number.parseInt(value ?? "", 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
+  if (value == null) return fallback;
+  const parsed = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new HttpError(400, "INVALID_PARAMETER", `Expected an integer between ${min} and ${max}.`);
+  }
+  return parsed;
 }
 
-export function boolParam(value: string | null): boolean {
-  return value === "1" || value === "true" || value === "yes";
+export function boolParam(value: string | null, fallback = false): boolean {
+  if (value == null) return fallback;
+  if (["1", "true", "yes"].includes(value)) return true;
+  if (["0", "false", "no"].includes(value)) return false;
+  throw new HttpError(400, "INVALID_PARAMETER", "Expected a boolean parameter.");
+}
+
+export function dateParam(value: string | null, fallback = currentShanghaiDate()): string {
+  if (value == null) return fallback;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`)) ||
+      new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) !== value) {
+    throw new HttpError(400, "INVALID_PARAMETER", "Expected a valid date in YYYY-MM-DD format.");
+  }
+  return value;
 }
 
 export function readListParam(url: URL, name: string): string[] {
-  const values = url.searchParams
-    .getAll(name)
-    .flatMap((value) => value.split(","));
-  const jsonValue = url.searchParams.get(
-    name.endsWith("s") ? name : `${name}s`,
-  );
-  if (jsonValue?.trim().startsWith("[")) {
+  const inputs = [...url.searchParams.getAll(name), ...url.searchParams.getAll(`${name}s`)];
+  const values = inputs.flatMap((value): string[] => {
+    if (!value.trim().startsWith("[")) return value.split(",");
     try {
-      const parsed = JSON.parse(jsonValue) as unknown;
-      if (Array.isArray(parsed)) values.push(...parsed.map(String));
-    } catch {
-      // Ignore malformed compatibility format; normal validation happens downstream.
-    }
-  }
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+      const parsed: unknown = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")) return parsed;
+    } catch { /* Invalid arrays are rejected below. */ }
+    throw new HttpError(400, "INVALID_PARAMETER", `${name} must contain strings.`);
+  });
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
 }
 
 export function requireAdmin(request: Request, env: Env): Response | null {
@@ -83,6 +93,7 @@ export function applyCorsHeaders(headers: Headers): void {
   headers.set("access-control-allow-origin", "*");
   headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
   headers.set("access-control-allow-headers", "authorization, content-type, if-none-match");
+  headers.set("access-control-expose-headers", "ETag, X-Cache-Expires-At, X-Cache-Stale, Retry-After");
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -245,8 +256,8 @@ export function seasonDateRange(season: SeasonInfo): {
 }
 
 export function parseSeason(value: string | null): SeasonInfo {
-  if (!value) return currentSeason();
-  const normalized = value.trim().toUpperCase();
+  if (!value || value.toLowerCase() === "current") return currentSeason();
+  const normalized = value.trim().toUpperCase().replace(/^(\d{4})-/, "$1 ");
   const match = /^(\d{4})Q([1-4])$/.exec(normalized);
   if (match) {
     const year = Number(match[1]);
@@ -278,5 +289,5 @@ export function parseSeason(value: string | null): SeasonInfo {
       name: labelMatch[2] as SeasonInfo["name"],
     };
   }
-  return currentSeason();
+  throw new HttpError(400, "INVALID_PARAMETER", "Expected a season such as 2026Q3 or 2026-summer.");
 }

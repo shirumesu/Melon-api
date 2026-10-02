@@ -1,4 +1,5 @@
 import { cacheKey, getOrSetJson } from "./cache";
+import { HttpError } from "./types";
 import type {
   CharacterCredit,
   Env,
@@ -157,7 +158,7 @@ export type SearchInput = {
 };
 
 export class BangumiClient {
-  constructor(private readonly env: Env) {}
+  constructor(private readonly env: Env, private readonly signal?: AbortSignal) {}
 
   async searchSubjects(input: SearchInput): Promise<Paged<SubjectListItem>> {
     const filter: Record<string, unknown> = {
@@ -190,7 +191,7 @@ export class BangumiClient {
       total,
       limit,
       offset,
-      hasMore: offset + limit < total,
+      hasMore: offset + limit < total && offset + limit <= 5000,
       data: response.data.map((subject) => this.mapSubjectListItem(subject)),
     };
   }
@@ -234,13 +235,32 @@ export class BangumiClient {
     return this.fetchJson<BangumiSubject>(`/v0/subjects/${subjectId}`);
   }
 
-  async getEpisodes(subjectId: number): Promise<Episode[]> {
-    const page = (offset: number) =>
-      this.fetchJson<EpisodesResponse>(
-        `/v0/episodes?subject_id=${subjectId}&type=0&limit=200&offset=${offset}`,
-      );
+  async getEpisodesPage(subjectId: number, limit = 200, offset = 0, force = false,
+    background?: (task: Promise<unknown>) => void): Promise<Paged<Episode>> {
+    const result = await getOrSetJson(this.env,
+      cacheKey(["subjects", subjectId, "episode-page-v3", limit, offset]),
+      { ttlSeconds: 6 * 60 * 60, force },
+      async () => {
+        const response = await this.fetchJson<EpisodesResponse>(
+          `/v0/episodes?subject_id=${subjectId}&type=0&limit=${limit}&offset=${offset}`,
+        );
+        const data = response.data.filter((episode) => episode.id > 0 && episode.type === 0)
+          .map((episode) => this.mapEpisode(episode, subjectId));
+        const total = response.total ?? data.length;
+        const nextOffset = offset + response.data.length;
+        const hasMore = response.data.length > 0 && nextOffset < total;
+        return { total, limit: response.limit ?? limit, offset, hasMore,
+          ...(hasMore ? { nextOffset } : {}), data };
+      }, background);
+    return result.value;
+  }
+
+  async getEpisodes(subjectId: number, onPage?: (episodes: Episode[]) => void, force = false,
+    background?: (task: Promise<unknown>) => void): Promise<Episode[]> {
+    const page = (offset: number) => this.getEpisodesPage(subjectId, 200, offset, force, background);
     const first = await page(0);
-    const pageSize = first.data.length;
+    onPage?.(first.data);
+    const pageSize = first.nextOffset == null ? 0 : first.nextOffset - first.offset;
     const total = first.total ?? pageSize;
     const offsets: number[] = [];
     if (pageSize > 0) {
@@ -248,11 +268,13 @@ export class BangumiClient {
         offsets.push(offset);
       }
     }
-    const rest = await mapLimit(offsets, 4, page);
+    const rest: Paged<Episode>[] = [];
+    for (let index = 0; index < offsets.length; index += 4) {
+      const batch = await Promise.all(offsets.slice(index, index + 4).map(page));
+      for (const response of batch) { rest.push(response); onPage?.(response.data); }
+    }
     return [first, ...rest]
-      .flatMap((response) => response.data)
-      .filter((episode) => episode.id > 0 && episode.type === 0)
-      .map((episode) => this.mapEpisode(episode, subjectId));
+      .flatMap((response) => response.data);
   }
 
   async getEpisode(episodeId: number): Promise<Episode> {
@@ -444,18 +466,34 @@ export class BangumiClient {
       headers.set("authorization", `Bearer ${this.env.BANGUMI_ACCESS_TOKEN}`);
     }
 
-    const response = await fetch(`${baseApi(this.env)}${path}`, {
-      ...init,
-      headers,
-      signal: AbortSignal.timeout(10_000),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${baseApi(this.env)}${path}`, {
+        ...init,
+        headers,
+        signal: this.signal ? AbortSignal.any([this.signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+      });
+    } catch (error) {
+      const timeout = error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name);
+      throw new HttpError(timeout ? 504 : 502, timeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE",
+        error instanceof Error ? error.message : "Bangumi is unavailable.");
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(
+      throw new HttpError(
+        response.status === 404 ? 404 : response.status === 429 ? 429 : 502,
+        response.status === 404 ? "NOT_FOUND" : response.status === 429 ? "UPSTREAM_RATE_LIMITED" : "UPSTREAM_UNAVAILABLE",
         `Bangumi API ${response.status} ${path}: ${text.slice(0, 200)}`,
+        undefined, response.headers.get("retry-after") ?? undefined,
       );
     }
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      const timeout = error instanceof DOMException && ["TimeoutError", "AbortError"].includes(error.name);
+      throw new HttpError(timeout ? 504 : 502, timeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE",
+        error instanceof Error ? error.message : "Invalid Bangumi response.");
+    }
   }
 }
 

@@ -2,15 +2,16 @@ export function openApiSpec(publicBaseUrl: string): unknown {
   const cacheSchema = schemaRef("CacheMeta");
   const errorResponse = response("错误响应", schemaRef("ApiError"));
 
-  return {
+  const spec = {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.4",
+      version: "0.1.5",
       description: [
         "Melon API 是给 melonbang 追番客户端使用的 Bangumi-first 动画信息聚合 API。",
         "优先使用 Bangumi v0 API 获取 subject、章节、角色、制作人员等结构化数据；Bangumi 官方 API 暂未覆盖的吐槽箱、讨论版、单集评论会从公开网页 HTML 做 best-effort 解析。",
         "Worker 会把聚合结果缓存在 R2，客户端请求一般读取缓存，避免一次请求立刻 fan out 到多个外部来源。",
+        "结构化目录响应支持 ETag / If-None-Match。304 与 200 都通过 X-Cache-Expires-At、X-Cache-Stale 给出新鲜度。无效日期、整数、布尔值、排序和季度参数返回 400；搜索 offset 最大 5000。",
         "所有番剧条目都尽量保留 subjectId；章节相关接口保留 episodeId，方便客户端跳转到 Bangumi 对应页面。",
       ].join("\n\n"),
     },
@@ -138,6 +139,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             queryParam("offset", "integer", "分页偏移。", {
               default: 0,
               minimum: 0,
+              maximum: 5000,
             }),
             queryParam(
               "includeNsfw",
@@ -175,10 +177,13 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           ].join("\n\n"),
           parameters: [
             pathId("subjectId", "Bangumi subject ID。"),
+            queryParam("view", "string", "basic 只读主体；playback 增加完整主线章节和别名；full 增加角色、制作人员、关联条目及时间表。显式 view 时 includeHtml 默认 false。", { enum: ["basic", "playback", "full"], default: "full" }),
+            queryParam("date", "string", "完整详情放送规则的中心日期；参与缓存身份。", { format: "date" }),
+            queryParam("streamVersion", "integer", "1 保留完整 complete；2 的冷响应用 snapshot/patch 累积数据，append 数组指定追加字段（episodes），complete 可仅含 cache。缓存命中的 complete 仍包含完整 data。pending 中的章节也可能已有前缀。", { enum: [1, 2], default: 1 }),
             queryParam("full", "boolean", "是否返回聚合详情。默认 true。", {
               default: true,
             }),
-            queryParam("includeHtml", "boolean", "是否实时抓取评论和讨论。默认 true。", {
+            queryParam("includeHtml", "boolean", "是否实时抓取评论和讨论。未指定 view 时默认 true；显式 view 时默认 false。", {
               default: true,
             }),
             forceQueryParam(),
@@ -205,7 +210,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
                 "application/x-ndjson": {
                   schema: {
                     type: "string",
-                    description: "每行一个 JSON 事件：snapshot、patch、complete 或 error。pending 标记未完成分区，只有 complete 表示完整成功。",
+                    description: "每行一个 JSON 事件：snapshot、patch、complete 或 error。v2 patch 的 append:[episodes] 表示追加有序章节，其他字段替换。只有 complete 表示完整成功；v2 冷 complete 可省略 data，并在 cache.etag 返回版本。",
                   },
                 },
               },
@@ -217,7 +222,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
       },
       "/v1/subjects/{subjectId}/episodes": listChildEndpoint(
         "番剧章节列表",
-        "获取某个 subject 的主线章节列表，只返回 type=main 的章节。",
+        "获取某个 subject 的主线章节列表，只返回 type=main。无分页参数时保留完整 data 数组；传 limit 或 offset 时返回 total/limit/offset/hasMore/data，limit 默认100、最大200。",
         "Episode",
       ),
       "/v1/subjects/{subjectId}/characters": listChildEndpoint(
@@ -288,9 +293,13 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "以 date 为中心，返回前后 days 天的播出条目。默认 date 是上海时区今天，days=7，因此窗口是前 7 天到后 7 天。",
             "数据源优先使用 bangumi-data 的 broadcast 规则，并从 sites 中提取 Bangumi subjectId。没有 broadcast 但有 begin 的条目会使用 begin-weekly-fallback 兜底。",
             "服务端会额外读取 Bangumi /calendar，并按窗口涉及的季度做少量 Bangumi 搜索补全：能匹配 subjectId 的条目会尽量补 coverUrl、episodeTotal、tags、metaTags、nsfw。补不到时不会丢条目，而是通过 needsFallback 和 nsfwStatus 明确告诉客户端需要兜底。",
-            "返回同时包含扁平 items 和按日期分组的 byDate，客户端可以直接做今日更新、前后 7 日时间轴或日历视图。默认不截断数量。",
+            "旧 days 是日期半径，因此 days=7 返回15天。推荐 startDate + dayCount 指定明确区间（如7天），view=byDate 或 items 避免重复数据；默认 both 保留旧响应。",
+            "缺失封面在后台修复，不阻塞当前时间表；不完整快照使用5分钟TTL，修复完成后更新同一缓存。",
           ].join("\n\n"),
           parameters: [
+            queryParam("startDate", "string", "明确窗口起点（含），与 dayCount 配合；提供后不使用 date/days 窗口。", { format: "date" }),
+            queryParam("dayCount", "integer", "从 startDate 起的总天数，不是前后半径。", { default: 7, minimum: 1, maximum: 63 }),
+            queryParam("view", "string", "选择一个数据表示避免重复传输。", { enum: ["both", "items", "byDate"], default: "both" }),
             queryParam(
               "date",
               "string",
@@ -441,6 +450,21 @@ export function openApiSpec(publicBaseUrl: string): unknown {
       schemas: schemas(),
     },
   };
+  for (const [path, operation] of Object.entries(spec.paths)) {
+    if (!path.startsWith("/v1/") || /\/(comments|topics)$/.test(path)) continue;
+    const get = (operation as { get?: { parameters?: unknown[]; responses: Record<string, unknown> } }).get;
+    if (!get) continue;
+    get.parameters ??= [];
+    get.parameters.push({ name: "If-None-Match", in: "header", schema: { type: "string" }, description: "已有的 ETag；版本未变化时返回304。" });
+    Object.assign(get.responses, {
+      "304": { description: "版本未变化。保留本地数据，读取 ETag、X-Cache-Expires-At 与 X-Cache-Stale 更新缓存新鲜度。" },
+      "400": errorResponse,
+      "429": { description: "上游限流；可能包含 Retry-After。" },
+      "502": errorResponse,
+      "504": errorResponse,
+    });
+  }
+  return spec;
 }
 
 export function docsHtml(): string {
@@ -543,6 +567,7 @@ function schemas(): Record<string, unknown> {
       },
       cachedAt: { type: "string", format: "date-time" },
       expiresAt: { type: "string", format: "date-time" },
+      etag: { type: "string", description: "可用于 If-None-Match 的不透明缓存版本。" },
     }),
     PagedSubjectList: objectSchema(
       {
@@ -777,6 +802,8 @@ function schemas(): Record<string, unknown> {
         generatedAt: { type: "string", format: "date-time" },
         centerDate: { type: "string", format: "date" },
         days: { type: "integer" },
+        startDate: { type: "string", format: "date" },
+        dayCount: { type: "integer", minimum: 1, maximum: 63 },
         window: objectSchema(
           {
             start: { type: "string", example: "2026-06-15 00:00" },
@@ -793,7 +820,7 @@ function schemas(): Record<string, unknown> {
           },
         },
       },
-      ["generatedAt", "centerDate", "days", "window", "items", "byDate"],
+      ["generatedAt", "centerDate", "days", "window"],
     ),
     ScheduleOccurrence: objectSchema(
       {
@@ -921,6 +948,10 @@ function listChildEndpoint(
       description,
       parameters: [
         pathId("subjectId", "Bangumi subject ID。"),
+        ...(itemSchema === "Episode" ? [
+          queryParam("limit", "integer", "传入时启用分页。", { default: 100, minimum: 1, maximum: 200 }),
+          queryParam("offset", "integer", "主线章节偏移。", { default: 0, minimum: 0 }),
+        ] : []),
         forceQueryParam(),
       ],
       security: optionalBearerSecurity(),
@@ -928,7 +959,10 @@ function listChildEndpoint(
         "200": response(
           summary,
           objectSchema(
-            { data: arrayOf(itemSchema), cache: schemaRef("CacheMeta") },
+            { data: arrayOf(itemSchema), cache: schemaRef("CacheMeta"), ...(itemSchema === "Episode" ? {
+              total: { type: "integer" }, limit: { type: "integer" }, offset: { type: "integer" }, hasMore: { type: "boolean" },
+              nextOffset: { type: "integer", description: "按上游原始页大小计算的下一页偏移；仅 hasMore=true 时返回。" },
+            } : {}) },
             ["data", "cache"],
           ),
         ),
@@ -994,6 +1028,7 @@ function seasonEndpoint(
         queryParam("offset", "integer", "分页偏移。", {
           default: 0,
           minimum: 0,
+          maximum: 5000,
         }),
         queryParam(
           "includeNsfw",
