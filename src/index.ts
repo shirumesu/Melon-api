@@ -7,11 +7,13 @@ import {
 } from "./html";
 import { docsHtml, openApiSpec } from "./openapi";
 import { sourceRules } from "./sources";
+import { loadSeasonCatalogue } from "./seasons";
 import {
   buildScheduleResponse,
   fallbackScheduleFromAirDate,
   loadSubjectSchedule,
   loadSubjectAliases,
+  loadBangumiData,
 } from "./schedule";
 import { HttpError, type Env, type ScheduleResponse, type SubjectDetail } from "./types";
 import {
@@ -210,7 +212,7 @@ async function getSubject(
     return { data, cache: result.cache };
   };
   if (streaming) {
-    return subjectDetailStream(async (send) => {
+    return subjectDetailStream(request, async (send) => {
       let progressed = false;
       const result = await load((event) => { progressed = true; send(event); });
       send({ type: "complete", ...(version === 2 && progressed && !includeHtml ? { cache: result.cache } : result) });
@@ -247,6 +249,12 @@ async function loadSubjectDetail(
     episodes: [], characters: [], staff: [], relatedSubjects: [], aliases: [], schedule: undefined,
   };
   let snapshotSent = false;
+  const queuedProgress: SubjectDetailProgress[] = [];
+  const sendProgress = (event: SubjectDetailProgress) => {
+    if (!progress) return;
+    if (snapshotSent) progress?.(event);
+    else queuedProgress.push(event);
+  };
   const assemble = (subject: Awaited<ReturnType<BangumiClient["getSubjectRaw"]>>) => {
     const detail = client.mapSubjectDetail(subject, {
       ...parts, comments: [], topics: [], notes: [],
@@ -258,9 +266,7 @@ async function loadSubjectDetail(
   const ready = <K extends SubjectDetailPart>(part: K, value: SubjectDetailParts[K], emit = true) => {
     parts[part] = value;
     pending.delete(part);
-    if (snapshotSent) {
-      progress?.({ type: "patch", data: emit ? { [part]: value ?? null } : {}, pending: [...pending] });
-    }
+    sendProgress({ type: "patch", data: emit ? { [part]: value ?? null } : {}, pending: [...pending] });
   };
   const background = (task: Promise<unknown>) => ctx.waitUntil(task);
   const part = <T>(name: string, ttl: number, loader: () => Promise<T>) => getOrSetJson(env,
@@ -269,7 +275,7 @@ async function loadSubjectDetail(
     episodes: async () => {
       const episodes = await client.getEpisodes(subjectId, version === 2 ? (page) => {
         parts.episodes.push(...page);
-        if (snapshotSent) progress?.({ type: "patch", data: { episodes: page }, append: ["episodes"], pending: [...pending] });
+        sendProgress({ type: "patch", data: { episodes: page }, append: ["episodes"], pending: [...pending] });
       } : undefined, force, background);
       ready("episodes", episodes, version !== 2);
     },
@@ -281,8 +287,15 @@ async function loadSubjectDetail(
   };
   const [subject] = await Promise.all([
     part("base-v1", 3600, () => client.getSubjectRaw(subjectId)).then((subject) => {
-      progress?.({ type: "snapshot", data: assemble(subject), pending: [...pending] });
+      const snapshot = client.mapSubjectDetail(subject, {
+        episodes: [], characters: [], staff: [], relatedSubjects: [], comments: [], topics: [], notes: [],
+      });
+      snapshot.aliases = [];
+      snapshot.schedule = fallbackScheduleFromAirDate(snapshot.airDate);
+      progress?.({ type: "snapshot", data: snapshot, pending: wanted });
       snapshotSent = true;
+      for (const event of queuedProgress) progress?.(event);
+      queuedProgress.length = 0;
       return subject;
     }),
     ...wanted.map((name) => loaders[name]()),
@@ -293,6 +306,7 @@ async function loadSubjectDetail(
 }
 
 function subjectDetailStream(
+  request: Request,
   produce: (send: (event: SubjectDetailProgress | { type: "complete"; data?: unknown; cache: unknown }) => void) => Promise<void>,
 ): Response {
   const encoder = new TextEncoder();
@@ -324,8 +338,16 @@ function subjectDetailStream(
   const headers = new Headers({
     "content-type": "application/x-ndjson; charset=utf-8",
     "cache-control": "no-store",
-    "vary": "Accept",
+    "vary": "Accept, Accept-Encoding",
   });
+  const clientEncoding = (request as Request & { cf?: { clientAcceptEncoding?: string | null } }).cf?.clientAcceptEncoding
+    ?? request.headers.get("accept-encoding");
+  const acceptsGzip = clientEncoding?.split(",").some((entry) => {
+    const [encoding, ...parameters] = entry.trim().split(";");
+    const quality = parameters.find((value) => value.trim().startsWith("q="));
+    return encoding === "gzip" && (quality === undefined || Number(quality.trim().slice(2)) > 0);
+  });
+  if (acceptsGzip) headers.set("content-encoding", "gzip");
   applyCorsHeaders(headers);
   return new Response(body, { headers });
 }
@@ -568,8 +590,20 @@ async function getSeason(
     includeNsfw: boolParam(url.searchParams.get("includeNsfw")),
   };
 
-  const client = new BangumiClient(env);
   const force = boolParam(url.searchParams.get("force"));
+  if (!input.q && !input.tags.length && !input.metaTags.length && !input.ratings.length &&
+      !input.ranks.length && input.airDates.length === 2 && (input.sort === "heat" || input.sort === "rank")) {
+    const result = await loadSeasonCatalogue(env, season, input.sort, input.includeNsfw, force,
+      ctx ? (task) => ctx.waitUntil(task) : undefined);
+    const cache = { ...result.cache, etag: `${result.cache.etag.slice(0, -1)}-${mode}-${input.limit}-${input.offset}"` };
+    const total = result.value.total;
+    return cachedJson({
+      season, range, total, limit: input.limit, offset: input.offset,
+      hasMore: input.offset + input.limit < total && input.offset + input.limit <= 5000,
+      data: result.value.data.slice(input.offset, input.offset + input.limit), cache,
+    }, cache);
+  }
+  const client = new BangumiClient(env);
   const key = queryCacheKey(`${mode}-v2`, { season: season.code, ...input });
   const result = await getOrSetJson(
     env,
@@ -591,25 +625,30 @@ async function getSeason(
 }
 
 async function refreshMaterializedCaches(env: Env): Promise<void> {
-  const origin = new URL("https://melon-api.local?force=1");
-  const seasonUrl = new URL("https://melon-api.local?force=1");
-  const homeUrl = new URL("https://melon-api.local?force=1&limit=8");
-  const weekUrl = new URL(`https://melon-api.local?force=1&startDate=${currentShanghaiDate()}&dayCount=7`);
+  const current = parseSeason(null);
+  const previous = parseSeason(current.quarter === 1
+    ? `${current.year - 1}Q4` : `${current.year}Q${current.quarter - 1}`);
+  const client = new BangumiClient(env);
+  await Promise.all([
+    ...[current, previous].flatMap((season) => [
+      loadSeasonCatalogue(env, season, "heat", false, true),
+      loadSeasonCatalogue(env, season, "rank", false, true),
+      loadSeasonCatalogue(env, season, "rank", true, true),
+    ]),
+    loadBangumiData(env, true),
+    getOrSetJson(env, "source/calendar", { ttlSeconds: 3600, force: true }, () => client.getCalendarSubjects()),
+  ]);
+  const origin = new URL("https://melon-api.local");
+  const weekUrl = new URL(`https://melon-api.local?startDate=${currentShanghaiDate()}&dayCount=7`);
   await Promise.all([
     getScheduleCached(origin, env, true, undefined, 0),
     getScheduleCached(origin, env, true),
-    getSeason(seasonUrl, env, "current"),
-    getSeason(homeUrl, env, "trending"),
     getScheduleCached(weekUrl, env, true),
     cleanupExpiredCacheObjects(env).catch((error) => {
       console.warn("Expired cache cleanup failed", error);
       return { scanned: 0, deleted: 0, truncated: false };
     }),
   ]);
-}
-
-function hasMissingScheduleCovers(value: ScheduleResponse): boolean {
-  return value.items.some((item) => item.subjectId != null && !item.coverUrl);
 }
 
 async function getScheduleCached(
@@ -627,17 +666,14 @@ async function getScheduleCached(
   const requireBroadcast = boolParam(url.searchParams.get("requireBroadcast"));
   const includeNsfw = boolParam(url.searchParams.get("includeNsfw"));
   const includeUnknownNsfw = boolParam(url.searchParams.get("includeUnknownNsfw"), true);
-  const force = forceOverride || boolParam(url.searchParams.get("force"));
+  const force = boolParam(url.searchParams.get("force"));
   const key = queryCacheKey("schedule-v3", { ...(startDate ? { startDate, dayCount } : { date, days }), requireBroadcast, includeNsfw, includeUnknownNsfw });
   return getOrSetJson(
     env,
     key,
     {
-      ttlSeconds: (value: ScheduleResponse) =>
-        hasMissingScheduleCovers(value) ? 5 * 60 : 24 * 60 * 60,
-      // Incomplete schedules have a short lifetime; artwork repair runs separately.
-      canServeStale: (value: ScheduleResponse) => !hasMissingScheduleCovers(value),
-      force,
+      ttlSeconds: 24 * 60 * 60,
+      force: forceOverride || force,
       staleWhileRevalidateSeconds: 24 * 60 * 60,
     },
     () =>
@@ -649,7 +685,7 @@ async function getScheduleCached(
           await waitForCacheLoad(key);
           const now = Date.now();
           await writeJson(env, key, { value, cachedAt: new Date(now).toISOString(),
-            expiresAt: new Date(now + (hasMissingScheduleCovers(value) ? 300 : 86400) * 1000).toISOString() });
+            expiresAt: new Date(now + 86400 * 1000).toISOString() });
         } : undefined,
       ),
     ctx ? (task) => ctx.waitUntil(task) : undefined,

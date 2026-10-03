@@ -1,5 +1,6 @@
 import { cacheKey, getOrSetJson } from "./cache";
 import { BangumiClient, subjectIdFromSites } from "./bangumi";
+import { loadSeasonCatalogue } from "./seasons";
 import type {
   Env,
   ScheduleOccurrence,
@@ -11,7 +12,6 @@ import {
   currentShanghaiDate,
   formatInShanghai,
   seasonFromDate,
-  seasonDateRange,
   shanghaiDateString,
   weekdayInShanghai,
 } from "./utils";
@@ -195,25 +195,7 @@ async function loadScheduleEnrichment(
         return [];
       }),
     ...seasons.map(async (season) => {
-      const range = seasonDateRange(season);
-      return getOrSetJson(
-        env,
-        cacheKey(["source", "season", season.code]),
-        { ttlSeconds: 6 * 60 * 60, force },
-        () => client.searchSubjects({
-          q: "",
-          limit: 100,
-          offset: 0,
-          sort: "rank",
-          tags: [],
-          metaTags: [],
-          airDates: [`>=${range.start}`, `<=${range.end}`],
-          ratings: [],
-          ranks: [],
-          includeNsfw: true,
-        }),
-        background,
-      )
+      return loadSeasonCatalogue(env, season, "rank", true, force, background)
         .then((result) => result.value.data)
         .catch((error) => {
           console.warn(`Bangumi season enrichment unavailable for ${season.code}`, error);

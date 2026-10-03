@@ -6,7 +6,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.5",
+      version: "0.1.6",
       description: [
         "Melon API 是给 melonbang 追番客户端使用的 Bangumi-first 动画信息聚合 API。",
         "优先使用 Bangumi v0 API 获取 subject、章节、角色、制作人员等结构化数据；Bangumi 官方 API 暂未覆盖的吐槽箱、讨论版、单集评论会从公开网页 HTML 做 best-effort 解析。",
@@ -173,13 +173,13 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "full=false 时只返回简略 SubjectListItem，适合列表补全或低成本探测。",
             "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；默认 full=true 且 includeHtml=true 时每次响应都会实时解析并覆盖缓存详情里的 comments/topics，解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
             "includeHtml=false 跳过网页抓取，直接复用完整结构化详情缓存，保留章节、角色/声优、制作人员、关联条目与播出时间；comments/topics 为空，可通过独立接口按需获取。full=false 时此参数无效。",
-            "full=true 时可发送 Accept: application/x-ndjson，按行接收 snapshot、patch、complete 或 error 事件。pending 标记尚未完成的分区；只有 complete 表示完整成功，不能将中间 snapshot/patch 保存为完整详情。缓存命中可直接返回 complete。任一结构化分区失败会终止聚合，不缓存空分区。",
+            "full=true 时可发送 Accept: application/x-ndjson，按行接收 snapshot、patch、complete 或 error 事件。首个 snapshot 仅携带基础资料，分区随后通过 patch 发送；支持协商 gzip。pending 标记尚未完成的分区；只有 complete 表示完整成功，不能将中间 snapshot/patch 保存为完整详情。缓存命中可直接返回 complete。任一结构化分区失败会终止聚合，不缓存空分区。",
           ].join("\n\n"),
           parameters: [
             pathId("subjectId", "Bangumi subject ID。"),
             queryParam("view", "string", "basic 只读主体；playback 增加完整主线章节和别名；full 增加角色、制作人员、关联条目及时间表。显式 view 时 includeHtml 默认 false。", { enum: ["basic", "playback", "full"], default: "full" }),
             queryParam("date", "string", "完整详情放送规则的中心日期；参与缓存身份。", { format: "date" }),
-            queryParam("streamVersion", "integer", "1 保留完整 complete；2 的冷响应用 snapshot/patch 累积数据，append 数组指定追加字段（episodes），complete 可仅含 cache。缓存命中的 complete 仍包含完整 data。pending 中的章节也可能已有前缀。", { enum: [1, 2], default: 1 }),
+            queryParam("streamVersion", "integer", "1 保留完整 complete；2 的冷响应用 snapshot/patch 累积数据，append 数组指定追加字段（episodes），complete 可仅含 cache。缓存命中的 complete 仍包含完整 data。首个 snapshot 的章节为空。", { enum: [1, 2], default: 1 }),
             queryParam("full", "boolean", "是否返回聚合详情。默认 true。", {
               default: true,
             }),
@@ -294,7 +294,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "数据源优先使用 bangumi-data 的 broadcast 规则，并从 sites 中提取 Bangumi subjectId。没有 broadcast 但有 begin 的条目会使用 begin-weekly-fallback 兜底。",
             "服务端会额外读取 Bangumi /calendar，并按窗口涉及的季度做少量 Bangumi 搜索补全：能匹配 subjectId 的条目会尽量补 coverUrl、episodeTotal、tags、metaTags、nsfw。补不到时不会丢条目，而是通过 needsFallback 和 nsfwStatus 明确告诉客户端需要兜底。",
             "旧 days 是日期半径，因此 days=7 返回15天。推荐 startDate + dayCount 指定明确区间（如7天），view=byDate 或 items 避免重复数据；默认 both 保留旧响应。",
-            "缺失封面在后台修复，不阻塞当前时间表；不完整快照使用5分钟TTL，修复完成后更新同一缓存。",
+            "缺失封面在后台修复，不阻塞当前时间表；文字资料使用24小时TTL并支持过期后台更新，缺图不缩短整份时间表的有效期。季度资料补全读取完整目录。",
           ].join("\n\n"),
           parameters: [
             queryParam("startDate", "string", "明确窗口起点（含），与 dayCount 配合；提供后不使用 date/days 窗口。", { format: "date" }),
@@ -417,7 +417,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           tags: ["内部"],
           summary: "刷新物化缓存",
           description: [
-            "触发 Worker 后台刷新 schedule、当前季度列表、当前季度热播列表。接口会立即返回 accepted=true，实际刷新在 waitUntil 中继续执行。",
+            "触发 Worker 后台刷新当季与上一季的完整目录、bangumi-data、Bangumi 日历，再生成常用时间表。接口会立即返回 accepted=true，实际刷新在 waitUntil 中继续执行。",
             "如果配置了 ADMIN_TOKEN，必须带 Authorization: Bearer <ADMIN_TOKEN>。生产环境应始终配置 ADMIN_TOKEN。",
           ].join("\n\n"),
           security: [{ bearerAuth: [] }],
