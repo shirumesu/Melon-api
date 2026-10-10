@@ -6,7 +6,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.6",
+      version: "0.1.7",
       description: [
         "Melon API 是给 melonbang 追番客户端使用的 Bangumi-first 动画信息聚合 API。",
         "优先使用 Bangumi v0 API 获取 subject、章节、角色、制作人员等结构化数据；Bangumi 官方 API 暂未覆盖的吐槽箱、讨论版、单集评论会从公开网页 HTML 做 best-effort 解析。",
@@ -36,7 +36,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
         get: {
           tags: ["基础"],
           summary: "在线来源声明式规则",
-          description: "返回维护者管理的规则快照。支持 If-None-Match / ETag。高于客户端 engine 的规则仍返回，以便客户端提示更新应用。规则不包含可执行脚本。",
+          description: "返回维护者管理的规则快照。支持 If-None-Match / ETag。高于客户端 engine 的规则仍返回，以便客户端提示更新应用；带 builtinBefore 且高于客户端 engine 的规则不返回，因为旧客户端已内置该来源。规则不包含可执行脚本。",
           parameters: [queryParam("engine", "integer", "客户端引擎版本。", { default: 1, minimum: 0 })],
           responses: {
             "200": response("规则快照", objectSchema({
