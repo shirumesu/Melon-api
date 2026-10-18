@@ -6,27 +6,17 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.7",
+      version: "0.1.8",
       description: [
-        "Melon API 是给 melonbang 追番客户端使用的 Bangumi-first 动画信息聚合 API。",
-        "优先使用 Bangumi v0 API 获取 subject、章节、角色、制作人员等结构化数据；Bangumi 官方 API 暂未覆盖的吐槽箱、讨论版、单集评论会从公开网页 HTML 做 best-effort 解析。",
-        "Worker 会把聚合结果缓存在 R2，客户端请求一般读取缓存，避免一次请求立刻 fan out 到多个外部来源。",
-        "结构化目录响应支持 ETag / If-None-Match。304 与 200 都通过 X-Cache-Expires-At、X-Cache-Stale 给出新鲜度。无效日期、整数、布尔值、排序和季度参数返回 400；搜索 offset 最大 5000。",
-        "所有番剧条目都尽量保留 subjectId；章节相关接口保留 episodeId，方便客户端跳转到 Bangumi 对应页面。",
+        "Melon API 只提供 melonbang 客户端需要“所有用户共享一次计算”或“由维护者统一下发”的数据：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名，以及在线来源规则快照。",
+        "条目详情、章节、角色、制作人员、搜索和社区内容由客户端直接读取 Bangumi，不经过本服务。",
+        "结构化目录响应支持 ETag / If-None-Match。304 与 200 都通过 X-Cache-Expires-At、X-Cache-Stale 给出新鲜度。无效日期、整数、布尔值、排序和季度参数返回 400。",
       ].join("\n\n"),
     },
     servers: [{ url: publicBaseUrl, description: "正式 API 域名" }],
     tags: [
       { name: "基础", description: "服务状态、OpenAPI 文档。" },
-      {
-        name: "搜索",
-        description: "按名称、标签、日期、评分、排名搜索 Bangumi 动画条目。",
-      },
-      {
-        name: "番剧",
-        description: "番剧详情、章节、角色、制作人员、吐槽箱、讨论版。",
-      },
-      { name: "章节", description: "单集详情和单集评论。" },
+      { name: "番剧", description: "按 subjectId 关联的 bangumi-data 地区译名。" },
       { name: "时间表", description: "从 bangumi-data 聚合的播出时间表。" },
       { name: "季度", description: "当前季度列表和热播列表。" },
       { name: "内部", description: "缓存刷新等运维接口。" },
@@ -86,201 +76,18 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           responses: { "200": { description: "HTML 文档页" } },
         },
       },
-      "/v1/subjects/search": {
-        get: {
-          tags: ["搜索"],
-          summary: "搜索番剧 subject",
-          description: [
-            "基于 Bangumi /v0/search/subjects 搜索动画条目，固定筛选 type=2，因此只返回动画类 subject。",
-            "适合搜索页、输入框联想、按标签找番。返回的是简略列表，每个结果都包含 subjectId。",
-            '数组参数支持重复 query 写法，例如 ?tag=TV&tag=校园；也支持 JSON 数组字符串，例如 ?tag=["TV","校园"]。',
-          ].join("\n\n"),
-          parameters: [
-            queryParam(
-              "q",
-              "string",
-              "搜索关键词。可传中文名、日文名、英文名或为空。",
-              { example: "黑猫" },
-            ),
-            arrayQueryParam(
-              "tag",
-              "普通标签筛选，例如 TV、漫画改、原创。Bangumi 会按标签过滤。",
-              ["TV", "漫画改"],
-            ),
-            arrayQueryParam(
-              "metaTag",
-              "Bangumi meta_tags 筛选，适合平台/地区/类型一类标签。",
-              ["日本", "校园"],
-            ),
-            arrayQueryParam(
-              "airDate",
-              "开播日期筛选，传给 Bangumi filter.air_date。支持 Bangumi API 的比较写法。",
-              [">=2026-04-01", "<=2026-06-30"],
-            ),
-            arrayQueryParam(
-              "rating",
-              "评分筛选，传给 Bangumi filter.rating。",
-              [">=6"],
-            ),
-            arrayQueryParam("rank", "排名筛选，传给 Bangumi filter.rank。", [
-              "<=5000",
-            ]),
-            queryParam(
-              "sort",
-              "string",
-              "排序方式：match 匹配度，heat 热度，rank 排名，score 评分。",
-              { enum: ["match", "heat", "rank", "score"], default: "match" },
-            ),
-            queryParam("limit", "integer", "每页数量，最大 100。", {
-              default: 10,
-              maximum: 100,
-              minimum: 1,
-            }),
-            queryParam("offset", "integer", "分页偏移。", {
-              default: 0,
-              minimum: 0,
-              maximum: 5000,
-            }),
-            queryParam(
-              "includeNsfw",
-              "boolean",
-              "是否允许 NSFW 结果。默认 false。",
-              { default: false },
-            ),
-            forceQueryParam(
-              "是否绕过 R2 缓存重新请求 Bangumi。调试时使用，客户端正常不要传。",
-            ),
-          ],
-          security: optionalBearerSecurity(),
-          responses: {
-            "200": response(
-              "分页番剧列表",
-              allOf([
-                schemaRef("PagedSubjectList"),
-                objectSchema({ cache: cacheSchema }),
-              ]),
-            ),
-            "500": errorResponse,
-          },
-        },
-      },
-      "/v1/subjects/{subjectId}": {
+      "/v1/subjects/{subjectId}/aliases": {
         get: {
           tags: ["番剧"],
-          summary: "获取番剧详情",
-          description: [
-            "获取单个 Bangumi subject 的详情。默认 full=true，会聚合 subject 基础信息、章节、角色/声优、制作人员、关联条目、吐槽箱、讨论版、播出时间。",
-            "full=false 时只返回简略 SubjectListItem，适合列表补全或低成本探测。",
-            "comments 和 topics 来自 Bangumi 网页 HTML 解析，不是官方结构化 API；默认 full=true 且 includeHtml=true 时每次响应都会实时解析并覆盖缓存详情里的 comments/topics，解析失败时接口仍会返回 subject 主体，并在 source.notes 标出失败原因。",
-            "includeHtml=false 跳过网页抓取，直接复用完整结构化详情缓存，保留章节、角色/声优、制作人员、关联条目与播出时间；comments/topics 为空，可通过独立接口按需获取。full=false 时此参数无效。",
-            "full=true 时可发送 Accept: application/x-ndjson，按行接收 snapshot、patch、complete 或 error 事件。首个 snapshot 仅携带基础资料，分区随后通过 patch 发送；支持协商 gzip。pending 标记尚未完成的分区；只有 complete 表示完整成功，不能将中间 snapshot/patch 保存为完整详情。缓存命中可直接返回 complete。任一结构化分区失败会终止聚合，不缓存空分区。",
-          ].join("\n\n"),
-          parameters: [
-            pathId("subjectId", "Bangumi subject ID。"),
-            queryParam("view", "string", "basic 只读主体；playback 增加完整主线章节和别名；full 增加角色、制作人员、关联条目及时间表。显式 view 时 includeHtml 默认 false。", { enum: ["basic", "playback", "full"], default: "full" }),
-            queryParam("date", "string", "完整详情放送规则的中心日期；参与缓存身份。", { format: "date" }),
-            queryParam("streamVersion", "integer", "1 保留完整 complete；2 的冷响应用 snapshot/patch 累积数据，append 数组指定追加字段（episodes），complete 可仅含 cache。缓存命中的 complete 仍包含完整 data。首个 snapshot 的章节为空。", { enum: [1, 2], default: 1 }),
-            queryParam("full", "boolean", "是否返回聚合详情。默认 true。", {
-              default: true,
-            }),
-            queryParam("includeHtml", "boolean", "是否实时抓取评论和讨论。未指定 view 时默认 true；显式 view 时默认 false。", {
-              default: true,
-            }),
-            forceQueryParam(),
-          ],
-          security: optionalBearerSecurity(),
-          responses: {
-            "200": {
-              description: "番剧详情",
-              content: {
-                "application/json": {
-                  schema: objectSchema(
-                    {
-                      data: {
-                        oneOf: [
-                          schemaRef("SubjectDetail"),
-                          schemaRef("SubjectListItem"),
-                        ],
-                      },
-                      cache: cacheSchema,
-                    },
-                    ["data", "cache"],
-                  ),
-                },
-                "application/x-ndjson": {
-                  schema: {
-                    type: "string",
-                    description: "每行一个 JSON 事件：snapshot、patch、complete 或 error。v2 patch 的 append:[episodes] 表示追加有序章节，其他字段替换。只有 complete 表示完整成功；v2 冷 complete 可省略 data，并在 cache.etag 返回版本。",
-                  },
-                },
-              },
-            },
-            "404": errorResponse,
-            "500": errorResponse,
-          },
-        },
-      },
-      "/v1/subjects/{subjectId}/episodes": listChildEndpoint(
-        "番剧章节列表",
-        "获取某个 subject 的主线章节列表，只返回 type=main。无分页参数时保留完整 data 数组；传 limit 或 offset 时返回 total/limit/offset/hasMore/data，limit 默认100、最大200。",
-        "Episode",
-      ),
-      "/v1/subjects/{subjectId}/characters": listChildEndpoint(
-        "番剧角色和声优",
-        "获取角色列表，并尽量包含关联声优、角色图、声优图。",
-        "CharacterCredit",
-      ),
-      "/v1/subjects/{subjectId}/staff": listChildEndpoint(
-        "番剧制作人员",
-        "获取制作团队/制作人员信息，包含 relation/role、头像、Bangumi person 链接。",
-        "StaffCredit",
-      ),
-      "/v1/subjects/{subjectId}/comments": htmlListEndpoint(
-        "番剧吐槽箱",
-        "从 Bangumi subject 页面实时解析公开吐槽箱，不读写 R2 缓存。官方 v0 API 暂不提供该数据，因此这是 best-effort 数据源。",
-        "SubjectComment",
-      ),
-      "/v1/subjects/{subjectId}/topics": htmlListEndpoint(
-        "番剧讨论版主题",
-        "从 Bangumi subject 页面实时解析公开讨论版主题，不读写 R2 缓存。适合详情页展示最近讨论。",
-        "Topic",
-      ),
-      "/v1/episodes/{episodeId}": {
-        get: {
-          tags: ["章节"],
-          summary: "获取单集详情",
-          description:
-            "通过 Bangumi episodeId 获取章节名、中文名、播出日期、时长、简介、评论数和 Bangumi URL。",
-          parameters: [
-            pathId("episodeId", "Bangumi episode ID。"),
-            forceQueryParam(),
-          ],
+          summary: "番剧地区译名",
+          description: "按 Bangumi subjectId 关联 bangumi-data 的原名及各地区译名，用于资源搜索与弹幕匹配；不根据相似标题推断。没有关联条目时 data 为空数组。",
+          parameters: [pathId("subjectId", "Bangumi subject ID。"), forceQueryParam()],
           security: optionalBearerSecurity(),
           responses: {
             "200": response(
-              "单集详情",
-              objectSchema({ data: schemaRef("Episode"), cache: cacheSchema }, [
-                "data",
-                "cache",
-              ]),
+              "译名列表",
+              objectSchema({ data: { type: "array", items: { type: "string" } }, cache: cacheSchema }, ["data", "cache"]),
             ),
-            "404": errorResponse,
-            "500": errorResponse,
-          },
-        },
-      },
-      "/v1/episodes/{episodeId}/comments": {
-        get: {
-          tags: ["章节"],
-          summary: "获取单集评论",
-          description: [
-            "从 Bangumi 单集页面 HTML 实时解析公开评论，不读写 R2 缓存。官方 v0 API 暂不提供 episode comments。",
-            "如果 Bangumi 页面结构变化、评论需要登录、或被访问限制，data 可能为空；此时 source.available=false。",
-          ].join("\n\n"),
-          parameters: [pathId("episodeId", "Bangumi episode ID。")],
-          security: optionalBearerSecurity(),
-          responses: {
-            "200": response("单集评论列表", htmlListResponse("EpisodeComment")),
             "500": errorResponse,
           },
         },
@@ -405,12 +212,12 @@ export function openApiSpec(publicBaseUrl: string): unknown {
       "/v1/seasons/current": seasonEndpoint(
         "当前季度番剧",
         "返回当前季度动画列表。季度按开播日期动态计算，不写死年份；可通过 season 参数查看指定季度。",
-        "rank",
+        true,
       ),
       "/v1/trending/current": seasonEndpoint(
         "当前季度热播",
-        "返回当前季度热播动画，默认按 Bangumi heat 排序。适合首页“本季度热播”。",
-        "heat",
+        "返回当前季度热播动画，按 Bangumi heat 排序。适合首页“本季度热播”。",
+        false,
       ),
       "/v1/internal/refresh": {
         post: {
@@ -451,7 +258,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     },
   };
   for (const [path, operation] of Object.entries(spec.paths)) {
-    if (!path.startsWith("/v1/") || /\/(comments|topics)$/.test(path)) continue;
+    if (!path.startsWith("/v1/")) continue;
     const get = (operation as { get?: { parameters?: unknown[]; responses: Record<string, unknown> } }).get;
     if (!get) continue;
     get.parameters ??= [];
@@ -605,40 +412,6 @@ function schemas(): Record<string, unknown> {
       },
       ["subjectId", "name", "displayName", "type", "tags", "metaTags", "url"],
     ),
-    SubjectDetail: allOf([
-      schemaRef("SubjectListItem"),
-      objectSchema(
-        {
-          ratingCount: { type: "integer" },
-          rating: schemaRef("Rating"),
-          collectionStats: schemaRef("SubjectCollectionStats"),
-          aliases: {
-            type: "array",
-            items: { type: "string" },
-            description: "按 Bangumi subjectId 关联 bangumi-data 的原名及各地区译名；不根据相似标题推断。数据缺失或不可用时为空数组。",
-          },
-          infoBox: arrayOf("SubjectInfoBoxItem"),
-          episodes: arrayOf("Episode"),
-          characters: arrayOf("CharacterCredit"),
-          staff: arrayOf("StaffCredit"),
-          relatedSubjects: arrayOf("RelatedSubject"),
-          comments: arrayOf("SubjectComment"),
-          topics: arrayOf("Topic"),
-          schedule: schemaRef("SubjectSchedule"),
-          source: schemaRef("SourceInfo"),
-        },
-        [
-          "infoBox",
-          "episodes",
-          "characters",
-          "staff",
-          "relatedSubjects",
-          "comments",
-          "topics",
-          "source",
-        ],
-      ),
-    ]),
     SubjectTag: objectSchema(
       { name: { type: "string" }, count: { type: "integer" } },
       ["name"],
@@ -653,150 +426,6 @@ function schemas(): Record<string, unknown> {
       },
       ["year", "quarter", "code", "label", "name"],
     ),
-    Rating: objectSchema({
-      score: { type: "number", example: 7.2 },
-      rank: { type: "integer", example: 7400 },
-      total: { type: "integer" },
-      count: { type: "object", additionalProperties: { type: "integer" } },
-    }),
-    SubjectCollectionStats: objectSchema({
-      wish: { type: "integer", description: "想看" },
-      watching: { type: "integer", description: "在看" },
-      completed: { type: "integer", description: "看过" },
-      on_hold: { type: "integer", description: "搁置" },
-      dropped: { type: "integer", description: "抛弃" },
-    }),
-    SubjectInfoBoxItem: objectSchema(
-      {
-        key: { type: "string", example: "放送开始" },
-        value: { type: "string", example: "2026年4月" },
-      },
-      ["key", "value"],
-    ),
-    Episode: objectSchema(
-      {
-        episodeId: idSchema("Bangumi episode ID。"),
-        subjectId: idSchema("所属 subject ID。"),
-        type: {
-          type: "string",
-          enum: ["main", "special", "op", "ed", "trailer", "mad", "other"],
-        },
-        sort: { type: "number" },
-        ep: { type: "number" },
-        name: { type: "string" },
-        nameCn: { type: "string" },
-        displayName: { type: "string" },
-        airdate: { type: "string", format: "date" },
-        duration: { type: "string" },
-        desc: { type: "string" },
-        commentCount: { type: "integer" },
-        url: { type: "string", format: "uri" },
-      },
-      ["episodeId", "subjectId", "type", "sort", "name", "displayName", "url"],
-    ),
-    CharacterCredit: objectSchema(
-      {
-        characterId: idSchema("Bangumi character ID。"),
-        name: { type: "string" },
-        nameCn: { type: "string" },
-        displayName: { type: "string" },
-        role: { type: "string", example: "主角" },
-        imageUrl: { type: "string", format: "uri" },
-        actors: arrayOf("PersonCredit"),
-        url: { type: "string", format: "uri" },
-      },
-      ["characterId", "name", "displayName", "actors", "url"],
-    ),
-    PersonCredit: objectSchema(
-      {
-        personId: idSchema("Bangumi person ID。"),
-        name: { type: "string" },
-        nameCn: { type: "string" },
-        displayName: { type: "string" },
-        imageUrl: { type: "string", format: "uri" },
-        relation: { type: "string" },
-        career: { type: "array", items: { type: "string" } },
-        url: { type: "string", format: "uri" },
-      },
-      ["personId", "name", "displayName", "url"],
-    ),
-    StaffCredit: allOf([
-      schemaRef("PersonCredit"),
-      objectSchema({ role: { type: "string", example: "导演" } }),
-    ]),
-    RelatedSubject: objectSchema(
-      {
-        subjectId: idSchema("Bangumi subject ID。"),
-        name: { type: "string" },
-        nameCn: { type: "string" },
-        displayName: { type: "string" },
-        relation: { type: "string", example: "续集" },
-        coverUrl: { type: "string", format: "uri" },
-        url: { type: "string", format: "uri" },
-      },
-      ["subjectId", "name", "displayName", "url"],
-    ),
-    SubjectComment: objectSchema(
-      {
-        id: { type: "string" },
-        user: schemaRef("CommentUser"),
-        score: { type: "number" },
-        status: { type: "string", example: "在看" },
-        createdAt: { type: "string" },
-        text: { type: "string" },
-        url: { type: "string", format: "uri" },
-      },
-      ["user", "text"],
-    ),
-    EpisodeComment: objectSchema(
-      {
-        floor: { type: "integer" },
-        user: schemaRef("CommentUser"),
-        createdAt: { type: "string" },
-        text: { type: "string" },
-        url: { type: "string", format: "uri" },
-      },
-      ["user", "text"],
-    ),
-    CommentUser: objectSchema(
-      {
-        username: { type: "string" },
-        nickname: { type: "string" },
-        avatarUrl: { type: "string", format: "uri" },
-      },
-      ["nickname"],
-    ),
-    Topic: objectSchema(
-      {
-        topicId: { type: "integer" },
-        title: { type: "string" },
-        author: { type: "string" },
-        replies: { type: "integer" },
-        updatedAt: { type: "string" },
-        url: { type: "string", format: "uri" },
-      },
-      ["title"],
-    ),
-    HtmlSource: objectSchema(
-      {
-        provider: { type: "string", enum: ["bangumi-web"] },
-        available: { type: "boolean" },
-        note: { type: "string" },
-      },
-      ["provider", "available", "note"],
-    ),
-    SubjectSchedule: objectSchema({
-      firstAiringAt: { type: "string", format: "date-time" },
-      firstAiringAtShanghai: { type: "string", example: "2026-06-22 00:00" },
-      weekday: { type: "string", example: "周一" },
-      recurrence: { type: "string", enum: ["P0D", "P1D", "P7D", "P1M"] },
-      nextAiringAt: { type: "string", format: "date-time" },
-      nextAiringAtShanghai: { type: "string" },
-      source: {
-        type: "string",
-        enum: ["bangumi-data", "bangumi-date", "unknown"],
-      },
-    }),
     ScheduleResponse: objectSchema(
       {
         generatedAt: { type: "string", format: "date-time" },
@@ -916,87 +545,13 @@ function schemas(): Record<string, unknown> {
         "source",
       ],
     ),
-    SourceInfo: objectSchema(
-      {
-        provider: { type: "string", enum: ["bangumi"] },
-        subjectUrl: { type: "string", format: "uri" },
-        apiCoverage: objectSchema({
-          subject: { type: "boolean" },
-          episodes: { type: "boolean" },
-          characters: { type: "boolean" },
-          staff: { type: "boolean" },
-          relatedSubjects: { type: "boolean" },
-          comments: { type: "boolean" },
-          topics: { type: "boolean" },
-        }),
-        notes: { type: "array", items: { type: "string" } },
-      },
-      ["provider", "apiCoverage", "notes"],
-    ),
-  };
-}
-
-function listChildEndpoint(
-  summary: string,
-  description: string,
-  itemSchema: string,
-): unknown {
-  return {
-    get: {
-      tags: ["番剧"],
-      summary,
-      description,
-      parameters: [
-        pathId("subjectId", "Bangumi subject ID。"),
-        ...(itemSchema === "Episode" ? [
-          queryParam("limit", "integer", "传入时启用分页。", { default: 100, minimum: 1, maximum: 200 }),
-          queryParam("offset", "integer", "主线章节偏移。", { default: 0, minimum: 0 }),
-        ] : []),
-        forceQueryParam(),
-      ],
-      security: optionalBearerSecurity(),
-      responses: {
-        "200": response(
-          summary,
-          objectSchema(
-            { data: arrayOf(itemSchema), cache: schemaRef("CacheMeta"), ...(itemSchema === "Episode" ? {
-              total: { type: "integer" }, limit: { type: "integer" }, offset: { type: "integer" }, hasMore: { type: "boolean" },
-              nextOffset: { type: "integer", description: "按上游原始页大小计算的下一页偏移；仅 hasMore=true 时返回。" },
-            } : {}) },
-            ["data", "cache"],
-          ),
-        ),
-        "404": response("未找到", schemaRef("ApiError")),
-        "500": response("错误响应", schemaRef("ApiError")),
-      },
-    },
-  };
-}
-
-function htmlListEndpoint(
-  summary: string,
-  description: string,
-  itemSchema: string,
-): unknown {
-  return {
-    get: {
-      tags: ["番剧"],
-      summary,
-      description,
-      parameters: [pathId("subjectId", "Bangumi subject ID。")],
-      security: optionalBearerSecurity(),
-      responses: {
-        "200": response(summary, htmlListResponse(itemSchema)),
-        "500": response("错误响应", schemaRef("ApiError")),
-      },
-    },
   };
 }
 
 function seasonEndpoint(
   summary: string,
   description: string,
-  defaultSort: "rank" | "heat",
+  sortable: boolean,
 ): unknown {
   return {
     get: {
@@ -1005,6 +560,7 @@ function seasonEndpoint(
       description: [
         description,
         "season 不传时按当前日期动态计算当前季度；例如 2026 年 6 月属于 2026 SPRING，2026 年 7 月属于 2026 SUMMER。",
+        "响应切自该季度预先整理的完整目录索引，不接受关键词、标签或评分筛选。",
       ].join("\n\n"),
       parameters: [
         queryParam(
@@ -1013,12 +569,7 @@ function seasonEndpoint(
           "指定季度。支持 current、2026-summer、2026 SUMMER、2026Q3 等常见写法。",
           { default: "current", example: "2026-summer" },
         ),
-        arrayQueryParam("tag", "追加 Bangumi 标签筛选。", ["TV"]),
-        arrayQueryParam("metaTag", "追加 Bangumi meta_tags 筛选。", ["日本"]),
-        queryParam("sort", "string", `排序方式。该接口默认 ${defaultSort}。`, {
-          enum: ["match", "heat", "rank", "score"],
-          default: defaultSort,
-        }),
+        ...(sortable ? [queryParam("sort", "string", "排序方式。", { enum: ["heat", "rank"], default: "rank" })] : []),
         queryParam(
           "limit",
           "integer",
@@ -1066,16 +617,6 @@ function seasonEndpoint(
   };
 }
 
-function htmlListResponse(itemSchema: string): unknown {
-  return objectSchema(
-    {
-      data: arrayOf(itemSchema),
-      source: schemaRef("HtmlSource"),
-    },
-    ["data", "source"],
-  );
-}
-
 function response(description: string, schema: unknown): unknown {
   return { description, content: { "application/json": { schema } } };
 }
@@ -1110,21 +651,6 @@ function forceQueryParam(description = "是否绕过 R2 缓存。"): unknown {
 
 function optionalBearerSecurity(): unknown[] {
   return [{ bearerAuth: [] }, {}];
-}
-
-function arrayQueryParam(
-  name: string,
-  description: string,
-  example: string[],
-): unknown {
-  return {
-    name,
-    in: "query",
-    description,
-    style: "form",
-    explode: true,
-    schema: { type: "array", items: { type: "string" }, example },
-  };
 }
 
 function objectSchema(

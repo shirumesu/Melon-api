@@ -6,7 +6,6 @@ import type {
   ScheduleOccurrence,
   ScheduleResponse,
   SubjectListItem,
-  SubjectSchedule,
 } from "./types";
 import {
   currentShanghaiDate,
@@ -254,72 +253,6 @@ export async function loadSubjectAliases(
   const names = subjectItems(data, subjectId)
     .flatMap((item) => [item.title, ...Object.values(item.titleTranslate ?? {}).flat()]);
   return unique(names.map((name) => name.trim()).filter(Boolean));
-}
-
-export async function loadSubjectSchedule(
-  env: Env,
-  subjectId: number,
-  date = currentShanghaiDate(),
-  force = false,
-  background?: (task: Promise<unknown>) => void,
-): Promise<SubjectSchedule | undefined> {
-  const data = await loadBangumiData(env, force, background);
-  const matching = subjectItems(data, subjectId);
-  const occurrences = buildSchedule(
-    matching,
-    shanghaiDayStartUtc(addDaysToDateString(date, -7)),
-    shanghaiDayStartUtc(addDaysToDateString(date, 8)),
-    {
-      requireBroadcast: false,
-      includeNsfw: true,
-      includeUnknownNsfw: true,
-      enrichment: new Map(),
-    },
-  );
-  return scheduleForSubject(occurrences, subjectId);
-}
-
-export function scheduleForSubject(
-  items: ScheduleOccurrence[],
-  subjectId: number,
-): SubjectSchedule | undefined {
-  const occurrences = items.filter((item) => item.subjectId === subjectId);
-  const first = occurrences[0];
-  if (!first) return undefined;
-  const next = occurrences.find(
-    (item) => Date.parse(item.airingAt) >= Date.now(),
-  );
-  return {
-    firstAiringAt: first.airingAt,
-    firstAiringAtShanghai: first.airingAtShanghai,
-    weekday: first.weekday,
-    recurrence: first.source.broadcast?.endsWith("/P1D")
-      ? "P1D"
-      : first.source.broadcast?.endsWith("/P1M")
-        ? "P1M"
-        : first.source.broadcast?.endsWith("/P0D")
-          ? "P0D"
-          : "P7D",
-    nextAiringAt: next?.airingAt,
-    nextAiringAtShanghai: next?.airingAtShanghai,
-    source: "bangumi-data",
-  };
-}
-
-export function fallbackScheduleFromAirDate(
-  airDate?: string,
-): SubjectSchedule | undefined {
-  if (!airDate) return undefined;
-  const season = seasonFromDate(airDate);
-  const start = new Date(`${airDate}T00:00:00+08:00`);
-  if (Number.isNaN(start.getTime())) return undefined;
-  return {
-    firstAiringAt: start.toISOString(),
-    firstAiringAtShanghai: formatInShanghai(start),
-    weekday: weekdayInShanghai(start),
-    recurrence: "P7D",
-    source: season ? "bangumi-date" : "unknown",
-  };
 }
 
 function buildSchedule(
