@@ -9,10 +9,11 @@
 
 ## 职责边界
 
-Melon API 只做两类事：
+Melon API 只做三类事：
 
 1. **所有用户共享一次计算的数据**：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名。
 2. **维护者统一下发的数据**：在线来源规则快照。
+3. **不能编进客户端的应用凭据**：Bangumi OAuth 令牌交换由服务端补上应用密钥；无状态，不存储、不缓存、不记录令牌。
 
 条目详情、章节、角色、制作人员、关联条目、搜索和社区内容由 MelonBanG 直接读取 Bangumi，本服务不做转发或聚合。
 
@@ -66,6 +67,12 @@ Melon API 只做两类事：
   按 Bangumi subjectId 关联 bangumi-data 的原名及地区译名（含繁体名称），用于资源搜索与弹幕匹配。
   确无匹配数据时返回空数组，不猜测译名；有效期24小时，支持 ETag。
 
+### Bangumi 登录
+
+* **POST** `/v1/auth/bangumi/token`  
+  JSON 请求体与 Bangumi 令牌接口相同（`grant_type`、`client_id` 及 `code`/`refresh_token`、`redirect_uri`、`state`），不含 `client_secret`。
+  服务端补上应用密钥后转发到 `bgm.tv/oauth/access_token`，原样返回状态与结果；只接受授权码与刷新两种 grant。
+
 ### 数据完整性与缓存
 
 时间表共用缓存的 bangumi-data 规则、Bangumi 日历和季度资料，仅为资料不完整的条目补取摘要。
@@ -116,10 +123,12 @@ wrangler r2 bucket create melon-api-cache
 1. 将 *.dev.vars.example* 修改为 *.dev.vars* 并填入信息  
 Access_token 在[这里](https://next.bgm.tv/demo/access-token)获取  
 ADMIN_TOKEN 请随意填写任意值  
+BANGUMI_OAUTH_CLIENT_SECRET 是客户端所用 Bangumi 应用（App ID）的 App Secret；未设置时登录接口返回 503  
 
 ```bash
 wrangler secret put BANGUMI_ACCESS_TOKEN
 wrangler secret put ADMIN_TOKEN
+wrangler secret put BANGUMI_OAUTH_CLIENT_SECRET
 ```
 
 2. 将 *wrangler.toml.example* 修改为 *wrangler.toml*  

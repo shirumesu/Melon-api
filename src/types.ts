@@ -3,6 +3,7 @@ export type Env = {
   DB?: D1Database;
   BANGUMI_ACCESS_TOKEN?: string;
   ADMIN_TOKEN?: string;
+  BANGUMI_OAUTH_CLIENT_SECRET?: string;
   BANGUMI_API_BASE?: string;
   BANGUMI_WEB_BASE?: string;
   BANGUMI_DATA_SOURCE?: string;

@@ -6,7 +6,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.8",
+      version: "0.1.9",
       description: [
         "Melon API 只提供 melonbang 客户端需要“所有用户共享一次计算”或“由维护者统一下发”的数据：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名，以及在线来源规则快照。",
         "条目详情、章节、角色、制作人员、搜索和社区内容由客户端直接读取 Bangumi，不经过本服务。",
@@ -36,6 +36,32 @@ export function openApiSpec(publicBaseUrl: string): unknown {
               requiresUpdate: { type: "array", items: { type: "string" } },
             }, ["engine", "version", "updatedAt", "rules"])),
             "304": { description: "规则未变化。" },
+          },
+        },
+      },
+      "/v1/auth/bangumi/token": {
+        post: {
+          tags: ["基础"],
+          summary: "Bangumi OAuth 令牌交换",
+          description: "代客户端补上 Bangumi 应用密钥后转发到 bgm.tv/oauth/access_token，原样返回状态和结果。只接受 authorization_code（code、redirect_uri、state）与 refresh_token（refresh_token、redirect_uri）两种 grant。不存储、不缓存、不记录令牌。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: objectSchema({
+                  grant_type: { type: "string", enum: ["authorization_code", "refresh_token"] },
+                  client_id: { type: "string" },
+                  code: { type: "string" },
+                  refresh_token: { type: "string" },
+                  redirect_uri: { type: "string" },
+                  state: { type: "string" },
+                }, ["grant_type", "client_id"]),
+              },
+            },
+          },
+          responses: {
+            "200": response("Bangumi 令牌", { type: "object" }),
+            "503": { description: "服务端尚未配置 Bangumi 应用密钥。" },
           },
         },
       },

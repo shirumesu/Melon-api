@@ -1,3 +1,4 @@
+import { bangumiToken } from "./auth";
 import { BangumiClient } from "./bangumi";
 import { cacheKey, cacheHeaders, cleanupExpiredCacheObjects, getOrSetJson, matchesEtag, queryCacheKey, waitForCacheLoad, writeJson, type CacheResult } from "./cache";
 import { docsHtml, openApiSpec } from "./openapi";
@@ -89,6 +90,8 @@ async function route(
     return json({ ok: true, now: new Date().toISOString() });
   if (path === "sources/rules" && request.method === "GET")
     return sourceRules(request, url);
+  if (path === "v1/auth/bangumi/token" && request.method === "POST")
+    return bangumiToken(request, env);
   if (path === "docs") {
     return new Response(docsHtml(), {
       headers: {
