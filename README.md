@@ -9,11 +9,12 @@
 
 ## 职责边界
 
-Melon API 只做三类事：
+Melon API 只做四类事：
 
 1. **所有用户共享一次计算的数据**：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名。
 2. **维护者统一下发的数据**：在线来源规则快照。
 3. **不能编进客户端的应用凭据**：Bangumi OAuth 令牌交换由服务端补上应用密钥；无状态，不存储、不缓存、不记录令牌。
+4. **MelonBanG 自己的社区数据**：MelonBanG 用户发送的弹幕，存于 D1，按 Bangumi 章节 ID 读取；发送需 Bangumi 登录，只保存 Bangumi 用户 ID。
 
 条目详情、章节、角色、制作人员、关联条目、搜索和社区内容由 MelonBanG 直接读取 Bangumi，本服务不做转发或聚合。
 
@@ -72,6 +73,20 @@ Melon API 只做三类事：
 * **POST** `/v1/auth/bangumi/token`  
   JSON 请求体与 Bangumi 令牌接口相同（`grant_type`、`client_id` 及 `code`/`refresh_token`、`redirect_uri`、`state`），不含 `client_secret`。
   服务端补上应用密钥后转发到 `bgm.tv/oauth/access_token`，原样返回状态与结果；只接受授权码与刷新两种 grant。
+
+### 弹幕
+
+* **GET** `/v1/danmaku/{episodeId}`  
+  按 Bangumi 章节 ID 返回 MelonBanG 用户发送的弹幕（`time` 秒、`mode` 1 滚动 / 4 底部 / 5 顶部、`color` RGB 整数、`text`），边缘缓存 30 秒。
+
+* **POST** `/v1/danmaku/{episodeId}`  
+  需要 `Authorization: Bearer <Bangumi 访问令牌>`。JSON 请求体 `time`、`text`（1–100 字）、`mode`、`color`。
+  服务端向 Bangumi `/v0/me` 确认身份，只保存用户 ID，不保存令牌；每人每 3 秒一条、每天（上海时区）200 条，超出返回 429。
+
+* **GET** `/v1/danmaku/quota`  
+  需要 Bangumi 令牌，返回 `limit`、`remaining`、`waitSeconds`、`resetIn`。
+
+表结构在 `migrations/`，新增迁移后执行 `wrangler d1 migrations apply melon-api --remote`，再推送部署。
 
 ### 数据完整性与缓存
 

@@ -34,8 +34,24 @@ interface R2Bucket {
   }): Promise<R2Objects>;
 }
 
+interface D1Result<T = Record<string, unknown>> {
+  results: T[];
+  meta: { last_row_id?: number; changes?: number };
+}
+
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
+  run(): Promise<D1Result>;
+}
+
 interface D1Database {
-  prepare(query: string): unknown;
+  prepare(query: string): D1PreparedStatement;
+}
+
+interface CacheStorage {
+  default: Cache;
 }
 
 interface ExecutionContext {

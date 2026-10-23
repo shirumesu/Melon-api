@@ -6,7 +6,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.1.9",
+      version: "0.2.0",
       description: [
         "Melon API 只提供 melonbang 客户端需要“所有用户共享一次计算”或“由维护者统一下发”的数据：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名，以及在线来源规则快照。",
         "条目详情、章节、角色、制作人员、搜索和社区内容由客户端直接读取 Bangumi，不经过本服务。",
@@ -19,6 +19,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
       { name: "番剧", description: "按 subjectId 关联的 bangumi-data 地区译名。" },
       { name: "时间表", description: "从 bangumi-data 聚合的播出时间表。" },
       { name: "季度", description: "当前季度列表和热播列表。" },
+      { name: "弹幕", description: "MelonBanG 用户发送的弹幕，按 Bangumi 章节 ID 存取。" },
       { name: "内部", description: "缓存刷新等运维接口。" },
     ],
     paths: {
@@ -62,6 +63,65 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           responses: {
             "200": response("Bangumi 令牌", { type: "object" }),
             "503": { description: "服务端尚未配置 Bangumi 应用密钥。" },
+          },
+        },
+      },
+      "/v1/danmaku/{episodeId}": {
+        get: {
+          tags: ["弹幕"],
+          summary: "读取一集的 MelonBanG 弹幕",
+          description: "按 Bangumi 章节 ID 返回 MelonBanG 用户发送的弹幕，按时间排序。只含本服务存储的弹幕，不含弹弹play 或 B 站的弹幕。边缘缓存 30 秒。mode：1 滚动，4 底部，5 顶部；color 为 RGB 整数。",
+          parameters: [pathId("episodeId", "Bangumi 章节 ID")],
+          responses: {
+            "200": response("弹幕列表", objectSchema({
+              episode: { type: "integer" },
+              data: {
+                type: "array",
+                items: objectSchema({
+                  id: { type: "integer" },
+                  time: { type: "number", description: "秒" },
+                  mode: { type: "integer", enum: [1, 4, 5] },
+                  color: { type: "integer" },
+                  text: { type: "string" },
+                }, ["id", "time", "mode", "color", "text"]),
+              },
+            }, ["episode", "data"])),
+            "503": { description: "服务端尚未配置弹幕存储。" },
+          },
+        },
+        post: {
+          tags: ["弹幕"],
+          summary: "发送一条弹幕",
+          description: "需要 Bangumi 访问令牌（Authorization: Bearer）。服务端向 Bangumi /v0/me 确认身份，只保存 Bangumi 用户 ID，不保存令牌。每人每 3 秒一条、每天（上海时区）200 条；超出返回 429 与 Retry-After。文字 1–100 字，换行折成空格。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: objectSchema({
+                  time: { type: "number", description: "秒" },
+                  text: { type: "string", maxLength: 100 },
+                  mode: { type: "integer", enum: [1, 4, 5], default: 1 },
+                  color: { type: "integer", default: 16777215 },
+                }, ["time", "text"]),
+              },
+            },
+          },
+          parameters: [pathId("episodeId", "Bangumi 章节 ID")],
+          responses: {
+            "201": response("已发送", quotaSchema({ id: { type: "integer" } })),
+            "401": { description: "没有或无效的 Bangumi 令牌。" },
+            "429": { description: "发送太快（TOO_FAST）或已达每日上限（DAILY_LIMIT）；details 为当前额度。" },
+          },
+        },
+      },
+      "/v1/danmaku/quota": {
+        get: {
+          tags: ["弹幕"],
+          summary: "今天还能发送多少弹幕",
+          description: "需要 Bangumi 访问令牌。返回每日上限、剩余条数、距可再次发送的秒数和距每日额度重置的秒数。",
+          responses: {
+            "200": response("发送额度", quotaSchema({})),
+            "401": { description: "没有或无效的 Bangumi 令牌。" },
           },
         },
       },
@@ -641,6 +701,16 @@ function seasonEndpoint(
       },
     },
   };
+}
+
+function quotaSchema(extra: Record<string, unknown>): unknown {
+  return objectSchema({
+    ...extra,
+    limit: { type: "integer" },
+    remaining: { type: "integer" },
+    waitSeconds: { type: "integer" },
+    resetIn: { type: "integer", description: "距每日额度重置的秒数" },
+  }, ["limit", "remaining", "waitSeconds", "resetIn"]);
 }
 
 function response(description: string, schema: unknown): unknown {

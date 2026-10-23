@@ -1,6 +1,7 @@
 import { bangumiToken } from "./auth";
 import { BangumiClient } from "./bangumi";
 import { cacheKey, cacheHeaders, cleanupExpiredCacheObjects, getOrSetJson, matchesEtag, queryCacheKey, waitForCacheLoad, writeJson, type CacheResult } from "./cache";
+import { danmakuQuota, listDanmaku, sendDanmaku } from "./danmaku";
 import { docsHtml, openApiSpec } from "./openapi";
 import { sourceRules } from "./sources";
 import { loadSeasonCatalogue } from "./seasons";
@@ -92,6 +93,11 @@ async function route(
     return sourceRules(request, url);
   if (path === "v1/auth/bangumi/token" && request.method === "POST")
     return bangumiToken(request, env);
+  if (path === "v1/danmaku/quota" && request.method === "GET")
+    return danmakuQuota(request, env);
+  const episode = /^v1\/danmaku\/([^/]+)$/.exec(path)?.[1];
+  if (episode && request.method === "GET") return listDanmaku(request, env, episode);
+  if (episode && request.method === "POST") return sendDanmaku(request, env, episode);
   if (path === "docs") {
     return new Response(docsHtml(), {
       headers: {

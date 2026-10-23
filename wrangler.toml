@@ -14,14 +14,13 @@ PUBLIC_BASE_URL = "https://melonapi.konataizumi.com"
 binding = "CACHE_BUCKET"
 bucket_name = "melon-api-cache"
 
-# Optional. Create with:
-# wrangler d1 create melon-api-index
-# Then fill database_id.
-#
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "melon-api-index"
-# database_id = ""
+# MelonBanG's own danmaku. Schema in migrations/; apply with
+# wrangler d1 migrations apply melon-api --remote
+[[d1_databases]]
+binding = "DB"
+database_name = "melon-api"
+database_id = "e0adc26e-1540-4cc6-9cc9-d66887317897"
+migrations_dir = "migrations"
 
 [observability]
 enabled = true

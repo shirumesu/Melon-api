@@ -13,14 +13,13 @@ BANGUMI_USER_AGENT = "melon-api"
 binding = "CACHE_BUCKET"
 bucket_name = "melon-api-cache"
 
-# Optional. Create with:
-# wrangler d1 create melon-api-index
-# Then fill database_id.
-#
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "melon-api-index"
-# database_id = ""
+# MelonBanG's own danmaku. Schema in migrations/; apply with
+# wrangler d1 migrations apply melon-api --remote
+[[d1_databases]]
+binding = "DB"
+database_name = "melon-api"
+database_id = ""
+migrations_dir = "migrations"
 
 [observability]
 enabled = true
