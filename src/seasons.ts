@@ -14,7 +14,7 @@ export function loadSeasonCatalogue(
   const range = seasonDateRange(season);
   return getOrSetJson(
     env,
-    cacheKey(["season-catalogue-v1", season.code, sort, includeNsfw ? "all" : "safe"]),
+    cacheKey(["season-catalogue-v2", season.code, sort, includeNsfw ? "all" : "safe"]),
     { ttlSeconds: 24 * 60 * 60, staleWhileRevalidateSeconds: 24 * 60 * 60, force },
     async () => {
       const client = new BangumiClient(env);

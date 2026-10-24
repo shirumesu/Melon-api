@@ -645,7 +645,7 @@ function seasonEndpoint(
       summary,
       description: [
         description,
-        "season 不传时按当前日期动态计算当前季度；例如 2026 年 6 月属于 2026 SPRING，2026 年 7 月属于 2026 SUMMER。",
+        "season 不传时按当前日期动态计算当前季度；季度从上一个月 25 日起算，月底首播的新番归入下一季；例如 2026-06-24 属于 2026 SPRING，2026-06-25 属于 2026 SUMMER。",
         "响应切自该季度预先整理的完整目录索引，不接受关键词、标签或评分筛选。",
       ].join("\n\n"),
       parameters: [

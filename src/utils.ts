@@ -221,11 +221,13 @@ export function weekdayInShanghai(date: Date): string {
 
 export function seasonFromDate(dateString?: string): SeasonInfo | undefined {
   if (!dateString) return undefined;
-  const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(dateString);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateString);
   if (!match) return undefined;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  if (!Number.isInteger(year) || !Number.isInteger(month)) return undefined;
+  // Shows premiering in the last week before a quarter belong to it
+  // (葬送的芙莉莲, 2023-09-29, is an October show).
+  const shifted = Number(match[2]) + (Number(match[3]) >= 25 ? 1 : 0);
+  const year = Number(match[1]) + (shifted > 12 ? 1 : 0);
+  const month = shifted > 12 ? 1 : shifted;
   const quarter = (Math.floor((month - 1) / 3) + 1) as 1 | 2 | 3 | 4;
   const names = ["WINTER", "SPRING", "SUMMER", "FALL"] as const;
   const name = names[quarter - 1] ?? "WINTER";
@@ -242,17 +244,15 @@ export function currentSeason(date = new Date()): SeasonInfo {
   return seasonFromDate(shanghaiDateString(date))!;
 }
 
+/** Inclusive dates of [season], from the 25th of the month before it (see [seasonFromDate]). */
 export function seasonDateRange(season: SeasonInfo): {
   start: string;
   end: string;
 } {
+  const day = (month: number, date: number) =>
+    new Date(Date.UTC(season.year, month - 1, date)).toISOString().slice(0, 10);
   const startMonth = (season.quarter - 1) * 3 + 1;
-  const endMonth = startMonth + 2;
-  const endDate = new Date(Date.UTC(season.year, endMonth, 0));
-  return {
-    start: `${season.year}-${String(startMonth).padStart(2, "0")}-01`,
-    end: `${season.year}-${String(endMonth).padStart(2, "0")}-${String(endDate.getUTCDate()).padStart(2, "0")}`,
-  };
+  return { start: day(startMonth - 1, 25), end: day(startMonth + 2, 24) };
 }
 
 export function parseSeason(value: string | null): SeasonInfo {
