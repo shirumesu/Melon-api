@@ -196,11 +196,20 @@ async function getSubjectAliases(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const force = boolParam(url.searchParams.get("force"));
+  // Every subject page asks for its aliases; the edge answers repeats
+  // without reading R2 or loading bangumi-data into a fresh isolate.
+  const edge = new Request(`${url.origin}/v1/subjects/${subjectId}/aliases`);
+  const hit = force ? undefined : await caches.default.match(edge);
+  if (hit) return hit;
   const background = (task: Promise<unknown>) => ctx.waitUntil(task);
   const result = await getOrSetJson(env, cacheKey(["subjects", subjectId, "aliases-v1"]),
     { ttlSeconds: 24 * 60 * 60, force },
     () => loadSubjectAliases(env, subjectId, force, background), background);
-  return cachedJson({ data: result.value, cache: result.cache }, result.cache);
+  const fresh = Math.floor((Date.parse(result.cache.expiresAt) - Date.now()) / 1000);
+  const response = cachedJson({ data: result.value, cache: result.cache }, result.cache,
+    fresh > 0 && !result.cache.stale ? { "cache-control": `public, max-age=${fresh}` } : {});
+  if (fresh > 0 && !result.cache.stale) ctx.waitUntil(caches.default.put(edge, response.clone()));
+  return response;
 }
 
 async function refreshMaterializedCaches(env: Env): Promise<void> {
