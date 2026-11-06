@@ -31,7 +31,7 @@ Melon API 只做四类事：
 
 ### 在线来源规则
 
-* **GET** `/sources/rules?engine=2`
+* **GET** `/sources/rules?engine=3`
   返回维护者管理的声明式来源规则（在线视频源与 BT RSS 索引）；支持 `If-None-Match` / `ETag`，未变化时返回 304。
   `minEngine` 超过客户端版本的规则仍返回，供客户端显示更新提示；
   带 `builtinBefore` 的规则不返回给低于该版本的客户端，因为它们已内置该来源。
