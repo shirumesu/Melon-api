@@ -4,6 +4,7 @@ import { cacheKey, cacheHeaders, cleanupExpiredCacheObjects, getOrSetJson, match
 import { danmakuQuota, listDanmaku, sendDanmaku } from "./danmaku";
 import { docsHtml, openApiSpec } from "./openapi";
 import { sourceRules } from "./sources";
+import { deleteSettings, getSettings, putSettings } from "./sync";
 import { loadSeasonCatalogue } from "./seasons";
 import {
   buildScheduleResponse,
@@ -95,6 +96,12 @@ async function route(
     return bangumiToken(request, env);
   if (path === "v1/danmaku/quota" && request.method === "GET")
     return danmakuQuota(request, env);
+  if (path === "v1/sync/settings" && request.method === "GET")
+    return getSettings(request, env);
+  if (path === "v1/sync/settings" && request.method === "PUT")
+    return putSettings(request, env);
+  if (path === "v1/sync/settings" && request.method === "DELETE")
+    return deleteSettings(request, env);
   const episode = /^v1\/danmaku\/([^/]+)$/.exec(path)?.[1];
   if (episode && request.method === "GET") return listDanmaku(request, env, episode);
   if (episode && request.method === "POST") return sendDanmaku(request, env, episode);

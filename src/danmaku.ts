@@ -1,3 +1,4 @@
+import { bangumiUser } from "./bangumi_user";
 import { HttpError, type Env } from "./types";
 import { json } from "./utils";
 
@@ -130,27 +131,6 @@ async function quota(db: D1Database, user: number): Promise<Quota> {
     waitSeconds: Math.max(0, Math.ceil(SEND_INTERVAL_SECONDS - since)),
     resetIn: Math.ceil((dayStart + DAY - now) / 1000),
   };
-}
-
-/** The Bangumi user ID behind the request's bearer token. */
-async function bangumiUser(request: Request, env: Env): Promise<number> {
-  const token = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1]?.trim();
-  if (!token) throw new HttpError(401, "UNAUTHORIZED", "请先登录 Bangumi");
-  const response = await fetch(`${env.BANGUMI_API_BASE ?? "https://api.bgm.tv"}/v0/me`, {
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${token}`,
-      "user-agent": env.BANGUMI_USER_AGENT ?? "melon-api",
-    },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (response.status === 401 || response.status === 403) {
-    throw new HttpError(401, "UNAUTHORIZED", "Bangumi 登录已失效，请重新登录");
-  }
-  if (!response.ok) throw new HttpError(502, "UPSTREAM_ERROR", `Bangumi 返回 ${response.status}`);
-  const id = Number(((await response.json()) as { id?: unknown }).id);
-  if (!Number.isSafeInteger(id) || id <= 0) throw new HttpError(502, "UPSTREAM_ERROR", "Bangumi 未返回用户");
-  return id;
 }
 
 /** The edge cache entry of an episode's list: path only, GET. */

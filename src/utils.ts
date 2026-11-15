@@ -91,8 +91,8 @@ export function requireAdmin(request: Request, env: Env): Response | null {
 
 export function applyCorsHeaders(headers: Headers): void {
   headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
-  headers.set("access-control-allow-headers", "authorization, content-type, if-none-match");
+  headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
+  headers.set("access-control-allow-headers", "authorization, content-type, if-none-match, if-match");
   headers.set("access-control-expose-headers", "ETag, X-Cache-Expires-At, X-Cache-Stale, Retry-After");
 }
 

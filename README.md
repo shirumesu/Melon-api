@@ -9,12 +9,13 @@
 
 ## 职责边界
 
-Melon API 只做四类事：
+Melon API 只做五类事：
 
 1. **所有用户共享一次计算的数据**：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名。
 2. **维护者统一下发的数据**：在线来源规则快照。
 3. **不能编进客户端的应用凭据**：Bangumi OAuth 令牌交换由服务端补上应用密钥；无状态，不存储、不缓存、不记录令牌。
 4. **MelonBanG 自己的社区数据**：MelonBanG 用户发送的弹幕，存于 D1，按 Bangumi 章节 ID 读取；发送需 Bangumi 登录，只保存 Bangumi 用户 ID。
+5. **用户自己的设置同步**：MelonBanG 设置的一份 JSON，存于 D1，按 Bangumi 用户 ID 读写，需 Bangumi 登录；不保存令牌，客户端不上传凭据和本机路径。
 
 条目详情、章节、角色、制作人员、关联条目、搜索和社区内容由 MelonBanG 直接读取 Bangumi，本服务不做转发或聚合。
 
@@ -86,6 +87,20 @@ Melon API 只做四类事：
 
 * **GET** `/v1/danmaku/quota`  
   需要 Bangumi 令牌，返回 `limit`、`remaining`、`waitSeconds`、`resetIn`。
+
+### 设置同步
+
+* **GET** `/v1/sync/settings`  
+  需要 Bangumi 令牌，返回 `rev`（修订号，从未上传为 0）、`updated`、`data`（设置对象），ETag 为修订号。
+
+* **PUT** `/v1/sync/settings`  
+  需要 Bangumi 令牌和 `If-Match: "<rev>"`（这次修改基于的修订号，首次为 `"0"`），JSON 请求体 `{"data": {...}}`，最大 256 KB。
+  修订号不一致返回 412，`details` 为云端当前设置；合并由客户端完成（三方合并，基准为上次同步的内容）。
+
+* **DELETE** `/v1/sync/settings`  
+  删除该用户在云端的设置。
+
+服务端确认过的令牌只在边缘以 SHA-256 摘要记住用户 ID 10 分钟，不保存令牌本身。
 
 表结构在 `migrations/`，新增迁移后执行 `wrangler d1 migrations apply melon-api --remote`，再推送部署。
 

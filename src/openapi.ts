@@ -125,6 +125,39 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           },
         },
       },
+      "/v1/sync/settings": {
+        get: {
+          tags: ["设置同步"],
+          summary: "读取云端设置",
+          description: "需要 Bangumi 访问令牌（Authorization: Bearer）。返回该用户的设置对象与修订号（ETag 为修订号）；从未上传时 rev 为 0、data 为空对象。服务端只按 Bangumi 用户 ID 保存，不保存令牌；客户端不上传凭据和本机路径。",
+          responses: {
+            "200": response("云端设置", syncSchema()),
+            "401": { description: "没有或无效的 Bangumi 令牌。" },
+          },
+        },
+        put: {
+          tags: ["设置同步"],
+          summary: "上传设置",
+          description: "If-Match 写明这次修改基于的修订号（首次上传为 \"0\"）。修订号不一致时返回 412（REVISION_MISMATCH），details 为云端当前的设置，客户端合并后重试。设置对象最大 256 KB。",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: objectSchema({ data: { type: "object" } }, ["data"]) } },
+          },
+          responses: {
+            "200": response("已保存", syncSchema()),
+            "401": { description: "没有或无效的 Bangumi 令牌。" },
+            "412": { description: "云端已被其他设备更新；details 为当前设置。" },
+            "413": { description: "设置超过 256 KB。" },
+            "428": { description: "缺少 If-Match。" },
+          },
+        },
+        delete: {
+          tags: ["设置同步"],
+          summary: "删除云端设置",
+          description: "需要 Bangumi 访问令牌。删除该用户保存的设置，返回 204。",
+          responses: { "204": { description: "已删除" }, "401": { description: "没有或无效的 Bangumi 令牌。" } },
+        },
+      },
       "/health": {
         get: {
           tags: ["基础"],
@@ -711,6 +744,14 @@ function quotaSchema(extra: Record<string, unknown>): unknown {
     waitSeconds: { type: "integer" },
     resetIn: { type: "integer", description: "距每日额度重置的秒数" },
   }, ["limit", "remaining", "waitSeconds", "resetIn"]);
+}
+
+function syncSchema(): unknown {
+  return objectSchema({
+    rev: { type: "integer", description: "修订号，从未上传时为 0" },
+    updated: { type: "string", format: "date-time", nullable: true },
+    data: { type: "object", description: "设置键值" },
+  }, ["rev", "updated", "data"]);
 }
 
 function response(description: string, schema: unknown): unknown {
