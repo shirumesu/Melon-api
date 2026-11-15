@@ -94,7 +94,7 @@ Melon API 只做五类事：
   需要 Bangumi 令牌，返回 `rev`（修订号，从未上传为 0）、`updated`、`data`（设置对象），ETag 为修订号。
 
 * **PUT** `/v1/sync/settings`  
-  需要 Bangumi 令牌和 `If-Match: "<rev>"`（这次修改基于的修订号，首次为 `"0"`），JSON 请求体 `{"data": {...}}`，最大 256 KB。
+  需要 Bangumi 令牌和 `If-Match: "<rev>"`（这次修改基于的修订号，首次为 `"0"`），JSON 请求体 `{"data": {...}}`，最大 1 MB（用户开启时也包含订阅和每部番的记录）。
   修订号不一致返回 412，`details` 为云端当前设置；合并由客户端完成（三方合并，基准为上次同步的内容）。
 
 * **DELETE** `/v1/sync/settings`  

@@ -7,11 +7,13 @@ import { json } from "./utils";
  * kept with a revision number. The client merges; the server only stores
  * the latest object and refuses a write made against an older revision
  * (If-Match), returning the current one so the client can merge again.
- * Clients never send credentials or machine-specific paths here.
+ * Clients never send credentials or machine-specific paths here. Besides
+ * settings, a client may keep the user's subscriptions and per-show records
+ * in the same object, which is why it may grow to a megabyte.
  */
 
 /** Largest stored settings object, in bytes of JSON. */
-export const MAX_SETTINGS_BYTES = 256 * 1024;
+export const MAX_SETTINGS_BYTES = 1024 * 1024;
 
 type Row = { rev: number; body: string; updated: number };
 

@@ -138,7 +138,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
         put: {
           tags: ["设置同步"],
           summary: "上传设置",
-          description: "If-Match 写明这次修改基于的修订号（首次上传为 \"0\"）。修订号不一致时返回 412（REVISION_MISMATCH），details 为云端当前的设置，客户端合并后重试。设置对象最大 256 KB。",
+          description: "If-Match 写明这次修改基于的修订号（首次上传为 \"0\"）。修订号不一致时返回 412（REVISION_MISMATCH），details 为云端当前的设置，客户端合并后重试。设置对象最大 1 MB。",
           requestBody: {
             required: true,
             content: { "application/json": { schema: objectSchema({ data: { type: "object" } }, ["data"]) } },
@@ -147,7 +147,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
             "200": response("已保存", syncSchema()),
             "401": { description: "没有或无效的 Bangumi 令牌。" },
             "412": { description: "云端已被其他设备更新；details 为当前设置。" },
-            "413": { description: "设置超过 256 KB。" },
+            "413": { description: "设置超过 1 MB。" },
             "428": { description: "缺少 If-Match。" },
           },
         },
