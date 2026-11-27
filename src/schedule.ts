@@ -1,6 +1,16 @@
 import { cacheKey, getOrSetJson } from "./cache";
 import { BangumiClient, subjectIdFromSites } from "./bangumi";
 import { loadSeasonCatalogue } from "./seasons";
+import {
+  briefSummary,
+  FetchBudget,
+  loadScheduleSubjects,
+  pending,
+  weekOf,
+  weeklyHeat,
+  type ScheduleSubject,
+  type WeeklyHeat,
+} from "./schedule_subjects";
 import type {
   Env,
   ScheduleOccurrence,
@@ -8,6 +18,7 @@ import type {
   SubjectListItem,
 } from "./types";
 import {
+  compact,
   currentShanghaiDate,
   formatInShanghai,
   seasonFromDate,
@@ -66,8 +77,8 @@ export async function buildScheduleResponse(
     includeNsfw?: boolean;
     includeUnknownNsfw?: boolean;
   },
+  budget: FetchBudget,
   background?: (task: Promise<unknown>) => void,
-  onRepair?: (value: ScheduleResponse) => Promise<void>,
 ): Promise<ScheduleResponse> {
   const centerDate = input.startDate ?? input.date ?? currentShanghaiDate();
   const windowStart = shanghaiDayStartUtc(
@@ -76,44 +87,33 @@ export async function buildScheduleResponse(
   const windowEnd = shanghaiDayStartUtc(
     input.startDate ? addDaysToDateString(input.startDate, input.dayCount ?? 7) : addDaysToDateString(centerDate, input.days + 1),
   );
-  const dataLoading = loadBangumiData(env, input.force, background);
-  const enrichmentLoading = loadScheduleEnrichment(
-    env,
-    windowStart,
-    windowEnd,
-    dataLoading.then((data) => collectScheduleSubjectIds(
-      data.items ?? [],
-      windowStart,
-      windowEnd,
-    )),
-    input.force,
-    background,
-    onRepair ? async (enrichment) => onRepair(assemble(await dataLoading, enrichment)) : undefined,
-  ).catch((error) => {
-    console.warn("schedule enrichment unavailable", error);
-    return new Map<number, SubjectListItem>();
+  const data = await loadBangumiData(env, input.force, background);
+  const subjectIds = collectScheduleSubjectIds(data.items ?? [], windowStart, windowEnd);
+  const { enrichment, store } = await loadScheduleEnrichment(
+    env, windowStart, windowEnd, subjectIds, budget, input.force, background,
+  );
+  const heat = await weeklyHeat(env, weekOf(shanghaiDateString(windowStart)), store);
+  const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
+    requireBroadcast: input.requireBroadcast ?? false,
+    includeNsfw: input.includeNsfw ?? false,
+    includeUnknownNsfw: input.includeUnknownNsfw ?? true,
+    enrichment,
+    store,
+    heat,
   });
-  const [data, enrichment] = await Promise.all([dataLoading, enrichmentLoading]);
-  return assemble(data, enrichment);
-  function assemble(data: BangumiData, enrichment: Map<number, SubjectListItem>): ScheduleResponse {
-    const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
-      requireBroadcast: input.requireBroadcast ?? false,
-      includeNsfw: input.includeNsfw ?? false,
-      includeUnknownNsfw: input.includeUnknownNsfw ?? true,
-      enrichment,
-    });
-    return {
-      generatedAt: new Date().toISOString(),
-      centerDate,
-      days: input.days,
-      ...(input.startDate ? { startDate: input.startDate, dayCount: input.dayCount ?? 7 } : {}),
-      window: {
-        start: formatInShanghai(windowStart),
-        endExclusive: formatInShanghai(windowEnd),
-      },
-      items,
-    };
-  }
+  return {
+    generatedAt: new Date().toISOString(),
+    centerDate,
+    days: input.days,
+    ...(input.startDate ? { startDate: input.startDate, dayCount: input.dayCount ?? 7 } : {}),
+    window: {
+      start: formatInShanghai(windowStart),
+      endExclusive: formatInShanghai(windowEnd),
+    },
+    items,
+    incomplete: subjectIds.filter((id) => pending(store.get(id))).length,
+    ...(heat ? { heat: { week: heat.week, since: heat.since } } : {}),
+  };
 }
 
 export async function loadBangumiData(
@@ -167,20 +167,25 @@ async function fetchBangumiData(env: Env, configured: string): Promise<BangumiDa
   );
 }
 
+/**
+ * What the window's subjects show: the Bangumi calendar and season lists
+ * first, then each subject's own details, which [budget] fetches when
+ * missing or out of date.
+ */
 async function loadScheduleEnrichment(
   env: Env,
   start: Date,
   end: Date,
-  requestedSubjectIds: Promise<number[]>,
+  subjectIds: number[],
+  budget: FetchBudget,
   force = false,
   background?: (task: Promise<unknown>) => void,
-  onRepair?: (enrichment: Map<number, SubjectListItem>) => Promise<void>,
-): Promise<Map<number, SubjectListItem>> {
+): Promise<{ enrichment: Map<number, SubjectListItem>; store: Map<number, ScheduleSubject> }> {
   const client = new BangumiClient(env, AbortSignal.timeout(15_000));
   const bySubjectId = new Map<number, SubjectListItem>();
   const seasons = seasonsInWindow(start, end);
-  const [subjectIds, calendarSubjects, ...seasonPages] = await Promise.all([
-    requestedSubjectIds,
+  const [store, calendarSubjects, ...seasonPages] = await Promise.all([
+    loadScheduleSubjects(env, subjectIds, budget),
     getOrSetJson(
       env,
       "source/calendar",
@@ -202,42 +207,25 @@ async function loadScheduleEnrichment(
         });
     }),
   ]);
-  for (const subject of [...calendarSubjects, ...seasonPages.flat()]) {
+  const briefs = subjectIds.flatMap((id) => store.get(id)?.brief ?? []);
+  for (const subject of [...calendarSubjects, ...seasonPages.flat(), ...briefs]) {
     bySubjectId.set(
       subject.subjectId,
       mergeScheduleSubject(bySubjectId.get(subject.subjectId), subject),
     );
   }
-  const missing = subjectIds.filter((id) => {
-    const subject = bySubjectId.get(id);
-    return !subject?.coverUrl || !subject.episodeTotal || subject.nsfw == null;
-  });
-  const repair = async (repairClient: BangumiClient) => {
-    for (const subject of await repairClient.getSubjectsByIds(missing, force, background)) {
-      const previous = bySubjectId.get(subject.subjectId);
-      bySubjectId.set(subject.subjectId, mergeScheduleSubject(previous, subject));
-    }
-  };
-  if (missing.length && background && onRepair) {
-    background(repair(new BangumiClient(env, AbortSignal.timeout(25_000)))
-      .then(() => onRepair(bySubjectId))
-      .catch((error) => console.warn("Schedule artwork repair failed", error)));
-  } else {
-    await repair(client);
-  }
-  return bySubjectId;
+  return { enrichment: bySubjectId, store };
 }
 
 function mergeScheduleSubject(
   previous: SubjectListItem | undefined,
   subject: SubjectListItem,
 ): SubjectListItem {
+  // Later sources are fuller: each value they have replaces the earlier one.
   return {
     ...previous,
-    ...subject,
+    ...compact(subject) as SubjectListItem,
     coverUrl: subject.coverUrl || previous?.coverUrl,
-    episodeTotal: subject.episodeTotal || previous?.episodeTotal,
-    nsfw: subject.nsfw ?? previous?.nsfw,
     tags: subject.tags.length ? subject.tags : previous?.tags ?? [],
     metaTags: subject.metaTags.length ? subject.metaTags : previous?.metaTags ?? [],
   };
@@ -264,6 +252,8 @@ function buildSchedule(
     includeNsfw: boolean;
     includeUnknownNsfw: boolean;
     enrichment: Map<number, SubjectListItem>;
+    store: Map<number, ScheduleSubject>;
+    heat: WeeklyHeat | null;
   },
 ): ScheduleOccurrence[] {
   const schedule: ScheduleOccurrence[] = [];
@@ -286,8 +276,12 @@ function buildSchedule(
           : "unknown";
     if (!options.includeNsfw && enriched?.nsfw === true) continue;
     if (!options.includeUnknownNsfw && enriched?.nsfw == null) continue;
+    const stored = subjectId ? options.store.get(subjectId) : undefined;
+    const heat = subjectId ? options.heat?.gains.get(subjectId) : undefined;
 
     for (const occurrence of occurrences) {
+      const episode = stored && airingEpisode(stored, occurrence, enriched?.episodeTotal);
+      const resumes = stored && !episode ? breakEnd(stored, occurrence) : undefined;
       schedule.push({
         airingAt: occurrence.toISOString(),
         airingAtShanghai: formatInShanghai(occurrence),
@@ -299,6 +293,16 @@ function buildSchedule(
         type: item.type ?? enriched?.platform ?? "tv",
         coverUrl: enriched?.coverUrl,
         episodeTotal: enriched?.episodeTotal,
+        summary: briefSummary(enriched?.summary),
+        airDate: enriched?.airDate,
+        platform: enriched?.platform,
+        score: enriched?.score,
+        rank: enriched?.rank,
+        ratingCount: enriched?.ratingCount,
+        collectionStats: enriched?.collectionStats,
+        ...(episode ? { episode } : {}),
+        ...(resumes ? { breakUntil: resumes } : {}),
+        ...(heat ? { collectionGain: heat.gain, previousCollectionGain: heat.previous } : {}),
         tags: enriched?.tags ?? [],
         metaTags: enriched?.metaTags ?? [],
         nsfw: enriched?.nsfw,
@@ -327,6 +331,44 @@ function buildSchedule(
       Date.parse(a.airingAt) - Date.parse(b.airingAt) ||
       a.displayName.localeCompare(b.displayName, "zh-Hans-CN"),
   );
+}
+
+/**
+ * The main episode dated the broadcast's day in Japan, or a day either
+ * side (Bangumi dates episodes where they first air); the nearest wins.
+ * It is the final one when it is the last listed and reaches the planned
+ * count of at most 60, which year-round shows do not have.
+ */
+function airingEpisode(
+  subject: ScheduleSubject,
+  occurrence: Date,
+  episodeTotal: number | undefined,
+): ScheduleOccurrence["episode"] {
+  const day = Date.parse(new Date(occurrence.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10));
+  let best: { distance: number; episode: NonNullable<ScheduleSubject["episodes"]>[number] } | undefined;
+  for (const episode of subject.episodes ?? []) {
+    const distance = Math.abs(Date.parse(episode.airdate) - day);
+    if (distance > MS_DAY) continue;
+    if (!best || distance < best.distance || (distance === best.distance && episode.sort < best.episode.sort)) {
+      best = { distance, episode };
+    }
+  }
+  if (!best) return undefined;
+  const number = best.episode.ep ?? best.episode.sort;
+  const final = episodeTotal != null && episodeTotal <= 60 && number >= episodeTotal &&
+    best.episode.sort === subject.lastSort;
+  return { ...best.episode, final };
+}
+
+/**
+ * The day the next episode airs, when Bangumi dates episodes before and
+ * after this broadcast but none on its day: the show takes this week off.
+ */
+function breakEnd(subject: ScheduleSubject, occurrence: Date): string | undefined {
+  const day = Date.parse(new Date(occurrence.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10));
+  const dates = (subject.episodes ?? []).map((episode) => episode.airdate).sort();
+  const next = dates.find((date) => Date.parse(date) > day + MS_DAY);
+  return next && dates.some((date) => Date.parse(date) < day - MS_DAY) ? next : undefined;
 }
 
 function collectScheduleSubjectIds(

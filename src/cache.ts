@@ -258,10 +258,6 @@ export function queryCacheKey(namespace: string, values: Record<string, unknown>
   return cacheKey([namespace, JSON.stringify(normalized)]);
 }
 
-export async function waitForCacheLoad(key: string): Promise<void> {
-  await pendingLoads.get(key);
-}
-
 export function cacheKey(
   parts: Array<string | number | boolean | undefined | null>,
 ): string {

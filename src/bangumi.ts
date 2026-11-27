@@ -1,6 +1,6 @@
-import { cacheKey, getOrSetJson } from "./cache";
 import { HttpError } from "./types";
 import type {
+  EpisodeBrief,
   Env,
   ImageSet,
   Paged,
@@ -52,6 +52,17 @@ type BangumiSubject = {
   };
   tags?: Array<{ name: string; count?: number }>;
   meta_tags?: string[];
+};
+
+type EpisodesResponse = {
+  total: number;
+  data: Array<{
+    id: number;
+    sort: number;
+    ep?: number;
+    airdate?: string;
+    comment?: number;
+  }>;
 };
 
 type CalendarResponse = Array<{
@@ -123,32 +134,30 @@ export class BangumiClient {
     return this.mapSubjectListItem(subject);
   }
 
-  async getSubjectsByIds(
-    subjectIds: number[],
-    force = false,
-    background?: (task: Promise<unknown>) => void,
-  ): Promise<SubjectListItem[]> {
-    const subjects = await mapLimit(subjectIds, 8, async (subjectId) => {
-      try {
-        return (await getOrSetJson(
-          this.env,
-          cacheKey(["subjects", subjectId, "brief"]),
-          {
-            ttlSeconds: (value: SubjectListItem) =>
-              value.coverUrl ? 60 * 60 : 5 * 60,
-            force,
-          },
-          () => this.getSubject(subjectId),
-          background,
-        )).value;
-      } catch (error) {
-        console.warn(`Schedule subject ${subjectId} unavailable`, error);
-        return null;
-      }
-    });
-    return subjects.filter(
-      (subject): subject is SubjectListItem => subject != null,
+  /**
+   * Main episodes at [offset], up to 100, and how many the subject has.
+   * Undated or placeholder entries (Bangumi dates unaired ones 2099) are
+   * left out.
+   */
+  async getMainEpisodes(
+    subjectId: number,
+    offset: number,
+  ): Promise<{ total: number; data: EpisodeBrief[] }> {
+    const page = await this.fetchJson<EpisodesResponse>(
+      `/v0/episodes?subject_id=${subjectId}&type=0&limit=100&offset=${offset}`,
     );
+    return {
+      total: page.total,
+      data: page.data
+        .filter((episode) => /^\d{4}-\d{2}-\d{2}$/.test(episode.airdate ?? ""))
+        .map((episode) => ({
+          id: episode.id,
+          sort: episode.sort,
+          ep: positiveNumber(episode.ep),
+          airdate: episode.airdate!,
+          comments: episode.comment ?? 0,
+        })),
+    };
   }
 
   async getCalendar(): Promise<CalendarResponse> {
@@ -184,10 +193,22 @@ export class BangumiClient {
       airDate: subject.date || undefined,
       season: seasonFromDate(subject.date),
       platform: subject.platform || undefined,
-      episodeTotal: positiveNumber(subject.total_episodes ?? subject.eps),
+      // The planned count (话数); 0 while unknown, as for year-round shows,
+      // rather than the episodes listed so far.
+      episodeTotal: positiveNumber(subject.eps ?? subject.total_episodes),
       nsfw: subject.nsfw,
       score: positiveNumber(subject.rating?.score),
       rank: positiveNumber(subject.rating?.rank),
+      ratingCount: positiveNumber(subject.rating?.total),
+      // The legacy calendar counts only watching; its subjects get stats
+      // from a fuller source.
+      collectionStats: subject.collection?.wish == null ? undefined : {
+        wish: subject.collection.wish,
+        watching: subject.collection.doing ?? 0,
+        completed: subject.collection.collect ?? 0,
+        on_hold: subject.collection.on_hold ?? 0,
+        dropped: subject.collection.dropped ?? 0,
+      },
       tags,
       metaTags,
       url: `${baseWeb(this.env)}/subject/${subject.id}`,
@@ -245,7 +266,7 @@ export function subjectIdFromSites(
   return toInt(typeof bgm?.id === "string" ? Number(bgm.id) : bgm?.id);
 }
 
-async function mapLimit<T, R>(
+export async function mapLimit<T, R>(
   items: T[],
   limit: number,
   mapper: (item: T) => Promise<R>,

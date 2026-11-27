@@ -7,7 +7,8 @@ workers_dev = true
 BANGUMI_API_BASE = "https://api.bgm.tv"
 BANGUMI_WEB_BASE = "https://bangumi.tv"
 BANGUMI_DATA_SOURCE = "https://cdn.jsdelivr.net/npm/bangumi-data@0.3/dist/data.json"
-BANGUMI_USER_AGENT = "melon-api"
+# Bangumi asks for <developer's Bangumi username>/<app> (<project page>).
+BANGUMI_USER_AGENT = "shiying/melon-api (https://github.com/shirumesu/Melon-api)"
 
 [[r2_buckets]]
 binding = "CACHE_BUCKET"
@@ -26,4 +27,6 @@ enabled = true
 head_sampling_rate = 1
 
 [triggers]
-crons = ["0 16 * * *"]
+# Daily at 00:00 Shanghai time: season lists and bangumi-data. Every half
+# hour: the schedules clients open (src/index.ts names the daily one).
+crons = ["0 16 * * *", "*/30 * * * *"]

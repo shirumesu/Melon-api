@@ -57,9 +57,29 @@ export type SubjectListItem = {
   nsfw?: boolean;
   score?: number;
   rank?: number;
+  ratingCount?: number;
+  collectionStats?: CollectionStats;
   tags: SubjectTag[];
   metaTags: string[];
   url: string;
+};
+
+/** Bangumi users with the subject in each collection list. */
+export type CollectionStats = {
+  wish: number;
+  watching: number;
+  completed: number;
+  on_hold: number;
+  dropped: number;
+};
+
+/** A main episode with a full air date. */
+export type EpisodeBrief = {
+  id: number;
+  sort: number;
+  ep?: number;
+  airdate: string;
+  comments: number;
 };
 
 export type ScheduleOccurrence = {
@@ -73,6 +93,20 @@ export type ScheduleOccurrence = {
   type: string;
   coverUrl?: string;
   episodeTotal?: number;
+  summary?: string;
+  airDate?: string;
+  platform?: string;
+  score?: number;
+  rank?: number;
+  ratingCount?: number;
+  collectionStats?: CollectionStats;
+  /** The main episode this broadcast airs, matched by air date. */
+  episode?: EpisodeBrief & { final: boolean };
+  /** Without an episode that day but with ones before and after: when the next airs. */
+  breakUntil?: string;
+  /** Collections the subject gained in the response's heat week, and the week before. */
+  collectionGain?: number;
+  previousCollectionGain?: number;
   tags: SubjectTag[];
   metaTags: string[];
   nsfw?: boolean;
@@ -110,6 +144,10 @@ export type ScheduleResponse = {
   };
   items: ScheduleOccurrence[];
   byDate?: Record<string, ScheduleOccurrence[]>;
+  /** Subjects in the window whose details or episodes are still being fetched. */
+  incomplete: number;
+  /** The Monday-start week collectionGain counts, and since when. */
+  heat?: { week: string; since: string };
 };
 
 export type SeasonInfo = {

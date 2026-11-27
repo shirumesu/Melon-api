@@ -1,11 +1,12 @@
 import { bangumiToken } from "./auth";
 import { BangumiClient } from "./bangumi";
-import { cacheKey, cacheHeaders, cleanupExpiredCacheObjects, getOrSetJson, matchesEtag, queryCacheKey, waitForCacheLoad, writeJson, type CacheResult } from "./cache";
+import { cacheKey, cacheHeaders, cleanupExpiredCacheObjects, getOrSetJson, matchesEtag, queryCacheKey, type CacheResult } from "./cache";
 import { danmakuQuota, listDanmaku, sendDanmaku } from "./danmaku";
 import { docsHtml, openApiSpec } from "./openapi";
 import { sourceRules } from "./sources";
 import { deleteSettings, getSettings, putSettings } from "./sync";
 import { loadSeasonCatalogue } from "./seasons";
+import { FetchBudget, weekOf } from "./schedule_subjects";
 import {
   buildScheduleResponse,
   loadSubjectAliases,
@@ -62,11 +63,11 @@ export default {
   },
 
   async scheduled(
-    _event: ScheduledEvent,
+    event: ScheduledEvent,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    ctx.waitUntil(refreshMaterializedCaches(env));
+    ctx.waitUntil(event.cron === DAILY_CRON ? refreshMaterializedCaches(env) : refreshSchedules(env));
   },
 };
 
@@ -219,6 +220,10 @@ async function getSubjectAliases(
   return response;
 }
 
+// wrangler.toml's crons: the daily one refreshes season lists and
+// bangumi-data, the half-hourly one the schedules clients open.
+const DAILY_CRON = "0 16 * * *";
+
 async function refreshMaterializedCaches(env: Env): Promise<void> {
   const current = parseSeason(null);
   const previous = parseSeason(current.quarter === 1
@@ -233,17 +238,22 @@ async function refreshMaterializedCaches(env: Env): Promise<void> {
     loadBangumiData(env, true),
     getOrSetJson(env, "source/calendar", { ttlSeconds: 3600, force: true }, () => client.getCalendarSubjects()),
   ]);
-  const origin = new URL("https://melon-api.local");
-  const weekUrl = new URL(`https://melon-api.local?startDate=${currentShanghaiDate()}&dayCount=7`);
-  await Promise.all([
-    getScheduleCached(origin, env, true, undefined, 0),
-    getScheduleCached(origin, env, true),
-    getScheduleCached(weekUrl, env, true),
-    cleanupExpiredCacheObjects(env).catch((error) => {
-      console.warn("Expired cache cleanup failed", error);
-      return { scanned: 0, deleted: 0, truncated: false };
-    }),
-  ]);
+  await cleanupExpiredCacheObjects(env);
+}
+
+/**
+ * Rebuilds today's schedule, the next seven days and this and next
+ * Monday-start week, one after another so they share a budget of Bangumi
+ * requests: what one window fetches, the next reads from the store.
+ */
+async function refreshSchedules(env: Env): Promise<void> {
+  const today = currentShanghaiDate();
+  const monday = weekOf(today);
+  const nextMonday = new Date(Date.parse(`${monday}T00:00:00Z`) + 7 * 86400 * 1000).toISOString().slice(0, 10);
+  const budget = new FetchBudget(40);
+  for (const query of [`startDate=${monday}&dayCount=7`, `startDate=${today}&dayCount=7`, "days=0", `startDate=${nextMonday}&dayCount=7`]) {
+    await getScheduleCached(new URL(`https://melon-api.local?${query}`), env, true, undefined, 7, budget);
+  }
 }
 
 async function getScheduleCached(
@@ -252,6 +262,9 @@ async function getScheduleCached(
   forceOverride = false,
   ctx?: ExecutionContext,
   defaultDays = 7,
+  // A request's share of its 50 external requests; the rest covers
+  // bangumi-data, the Bangumi calendar and season lists.
+  budget = new FetchBudget(30),
 ): Promise<Awaited<ReturnType<typeof getOrSetJson<ScheduleResponse>>>> {
   const days = clampInt(url.searchParams.get("days"), defaultDays, 0, 31);
   const date = dateParam(url.searchParams.get("date"));
@@ -262,12 +275,14 @@ async function getScheduleCached(
   const includeNsfw = boolParam(url.searchParams.get("includeNsfw"));
   const includeUnknownNsfw = boolParam(url.searchParams.get("includeUnknownNsfw"), true);
   const force = boolParam(url.searchParams.get("force"));
-  const key = queryCacheKey("schedule-v3", { ...(startDate ? { startDate, dayCount } : { date, days }), requireBroadcast, includeNsfw, includeUnknownNsfw });
+  const key = queryCacheKey("schedule-v4", { ...(startDate ? { startDate, dayCount } : { date, days }), requireBroadcast, includeNsfw, includeUnknownNsfw });
   return getOrSetJson(
     env,
     key,
     {
-      ttlSeconds: 24 * 60 * 60,
+      // An hour keeps new collections current; a window still missing
+      // details asks again within a minute, when more have been fetched.
+      ttlSeconds: (value: ScheduleResponse) => value.incomplete ? 60 : 60 * 60,
       force: forceOverride || force,
       staleWhileRevalidateSeconds: 24 * 60 * 60,
     },
@@ -275,13 +290,8 @@ async function getScheduleCached(
       buildScheduleResponse(
         env,
         { days, date, startDate, dayCount, force, requireBroadcast, includeNsfw, includeUnknownNsfw },
+        budget,
         ctx ? (task) => ctx.waitUntil(task) : undefined,
-        ctx ? async (value) => {
-          await waitForCacheLoad(key);
-          const now = Date.now();
-          await writeJson(env, key, { value, cachedAt: new Date(now).toISOString(),
-            expiresAt: new Date(now + 86400 * 1000).toISOString() });
-        } : undefined,
       ),
     ctx ? (task) => ctx.waitUntil(task) : undefined,
   );
