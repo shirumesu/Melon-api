@@ -2,7 +2,7 @@
 
 用来给自家 [MelonBanG](https://github.com/shirumesu/MelonBanG) 用的后端 api  
 
-基于 [Bangumi Api](https://bangumi.github.io/api/)，使用 Cloudflare worker + R2 存储缓存数据，总之大概是这样子  
+基于 [Bangumi Api](https://bangumi.github.io/api/)，使用 Cloudflare worker + R2 存储缓存数据，D1 存弹幕、设置同步和每周收藏人数，总之大概是这样子  
 也欢迎大家fork去部署  
 
 ---
@@ -11,7 +11,7 @@
 
 Melon API 只做五类事：
 
-1. **所有用户共享一次计算的数据**：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名。
+1. **所有用户共享一次计算的数据**：季度完整目录索引、bangumi-data 与 Bangumi 资料合成的播出时间表和每周热度、按 subjectId 关联的地区译名。
 2. **维护者统一下发的数据**：在线来源规则快照。
 3. **不能编进客户端的应用凭据**：Bangumi OAuth 令牌交换由服务端补上应用密钥；无状态，不存储、不缓存、不记录令牌。
 4. **MelonBanG 自己的社区数据**：MelonBanG 用户发送的弹幕，存于 D1，按 Bangumi 章节 ID 读取；发送需 Bangumi 登录，只保存 Bangumi 用户 ID。
@@ -49,6 +49,8 @@ Melon API 只做五类事：
 季度按开播日期划分，从上一个月 25 日起算：月底首播的新番按习惯归入下一季，例如 2023-09-29 首播的《葬送的芙莉莲》属于 2023 年 10 月季。
 服务端缓存该季度的完整目录，再按 `limit` / `offset` 切片；不接受关键词、标签或评分筛选。
 目录有效期为24小时，不同分页共用同一份资料，但 ETag 包含分页身份；NSFW 范围与排序分别缓存。
+Bangumi 搜索每页只返回 20 条，读第一页拿到总数后，其余分页 4 个一组并行读取。
+每日午夜只刷新本季的热播（heat）与目录（rank），其他季度、排序和 NSFW 范围在第一次请求时建立。
 
 ### 放送时间表
 
@@ -63,6 +65,17 @@ Melon API 只做五类事：
 推荐客户端使用 `GET /v1/schedule/latest?startDate=2026-10-02&dayCount=7&view=byDate`。
 `startDate` 是包含在窗口内的第一天，`dayCount` 是总天数（1–63）；旧 `date/days` 半径语义保留。
 `view=byDate` 或 `view=items` 只传输一种表示，默认 `both` 保留原响应。
+
+* **GET** `/v1/schedule/heat?week=2026-11-23`  
+  一周（周一 00:00 上海时间起）每部播出番剧的热度，从高到低排列，供客户端排热度周榜。
+  `week` 可以是这一周里的任意一天，默认本周；只能查前 6 周到下一周，其余返回 400。
+
+热度 0–100，由新增收藏 35%、本集吐槽 35%、在看人数 30% 组成，每项先除以这周最高的一部再开平方，避免一部爆款把其他的压到一起；还没统计到新增收藏的番剧只按另外两项算。
+`previousHeat` 是同一批番剧在前一周的热度，只给前一周也播出的。
+本集吐槽按每次播出对上的那一集算（周一凌晨播出、Bangumi 记在周日的一集也算这一周）；刚播出不到两天时与上一集取较多的，本周还没播时取上一集，停播的一周为 0。
+新增收藏以每周第一次拿到新鲜资料时的收藏人数为起点，记在 D1 的 `collection_snapshots`；`since` 是本周最早记下的时间。
+本周的热度由定时任务每 15 分钟重算，缓存 15 分钟（还有番剧在补资料时 1 分钟），往周和下周缓存 6 小时。响应约 10 KB，客户端可按 `X-Cache-Expires-At` 到期后轮询。
+时间表条目里的 `heat`、`heatComments`、`collectionGain` 等字段取自同一份结果，但跟随时间表缓存 1 小时；需要实时热度时读这个接口。
 
 ### 地区译名
 
@@ -106,25 +119,30 @@ Melon API 只做五类事：
 
 ### 数据完整性与缓存
 
-时间表共用缓存的 bangumi-data 规则、Bangumi 日历和季度资料，仅为资料不完整的条目补取摘要。
-每个摘要独立缓存；冷时间表先返回已有资料，缺图在后台补全并更新同一时间表缓存，不阻塞首屏。
-时间表前台补充资料预算为15秒，后台修复预算为25秒；文字资料统一使用24小时TTL，缺图不缩短整份时间表的有效期。
-季度补全读取完整目录，覆盖超过前100条的作品。没有 Bangumi 条目或上游确实没有图片时，
+时间表的播出规则来自 bangumi-data（6 小时更新），封面等基本资料先取 Bangumi 日历（1 小时更新）。
+条目资料（评分、排名、收藏人数、简介）按首播月份成批读取：同一个月首播的有 3 部以上时，用 `/v0/subjects?year=&month=` 一次取最多 100 部，30 分钟更新；
+其余条目（多为全年播出的长篇）逐个读取，2 小时更新。
+正篇章节逐个读取，用来对上每次播出是第几话、是否最终话和吐槽数：今天或昨天（日本时间）播出新一集的每小时更新，三天内的每 3 小时，其余每 12 小时。
+所有番剧的资料与章节存在 R2 的一个对象里，写入时比对 ETag，与其他实例同时写入时合并双方较新的部分再写；实例内存里的副本每分钟向 R2 确认一次是否变化。
+补不到资料的条目不会丢，`incomplete` 给出还在补的数量，这样的时间表只缓存 1 分钟；没有 Bangumi 条目或上游确实没有图片时，
 仍保留 `needsFallback.cover=true`，不猜测封面。
 
-R2 命中的数据会留在最多256项、估算序列化数据24 MiB预算的实例内存中，同一键的并发读取与加载共用请求。
+Workers 免费版每次调用最多 50 个外部请求：一次请求最多向 Bangumi 发 30 个，一次定时任务最多 40 个，其余留给 bangumi-data 和 Bangumi 日历；没补完的留给之后的请求和定时任务。
+定时任务每 15 分钟一次：先重算本周热度，再依次更新本周、今天起 7 天、今日和下周的时间表，提前更新会在下一次运行前到期的数据；
+请求只补缺失的、和过期超过一轮的数据（定时任务停了也能更新）。Bangumi 返回 429 时，这次调用不再继续请求。
+每日午夜（上海时间）刷新本季的热播与目录、bangumi-data 和 Bangumi 日历，再清理过期缓存：最多扫描5页、删除1000个过期对象，并保存下一轮的游标。
+
+R2 命中的数据会留在最多256项、24 MiB 的实例内存中，同一键的并发读取与加载共用请求。
 同一版本的 bangumi-data 只建立一次 subjectId 索引，译名与放送规则复用。
-季度列表和时间表过期后，可在 24 小时内先返回带 `cache.stale=true` 的已有数据，
+时间表、今日放送、热度、季度列表和译名的新鲜响应同时缓存在边缘节点，到期前直接返回，不再读 R2、重新序列化。
+季度列表和时间表过期后，可在 24 小时内（热度 1 小时内）先返回带 `cache.stale=true` 的已有数据，
 并通过 Worker `waitUntil` 刷新；客户端应结合 `cache.expiresAt` 判断服务端数据的新鲜度。
 有请求上下文时，新数据写入实例内存后即可响应，R2 持久化在后台完成；同一缓存键的写入保持顺序，避免较慢的旧写覆盖修复结果。
 管理员 `force=1` 仍等待新的上游结果。
 结构化目录响应支持 `ETag` / `If-None-Match`；304保留客户端数据，并通过 `X-Cache-Expires-At`、`X-Cache-Stale` 更新新鲜度。
-上游失败最多回退到过期14天内的数据；缺图时间表也可复用已保存的文字资料。
-每日清理最多扫描5页、删除1000个过期对象，并保存下一轮的游标。
+上游失败最多回退到过期14天内的数据。
 每次 Bangumi 上游请求及其响应正文读取最多等待 10 秒，不重试；bangumi-data 的备用来源共用10秒预算。
 上游不存在返回404，限流返回429并转发Retry-After，网络失败与超时分别返回502和504。
-定时刷新在上海时区每日午夜，更新当季与上一季的完整目录（安全范围的热度/排名、全范围的排名），
-并复用这些资料生成今日、前后7天及明确7天时间表。其他季度按需建立目录缓存。
 Workers Logs 已启用，缓存读写失败和上游错误可在 Cloudflare Observability 中查看。
 
 ## 如何部署
@@ -143,11 +161,14 @@ npm i -g wrangler
 wrangler login
 ```
 
-### 2. 创建 R2 存储桶
+### 2. 创建 R2 存储桶和 D1 数据库
 
 ```bash
 wrangler r2 bucket create melon-api-cache
+wrangler d1 create melon-api
 ```
+
+记下 `d1 create` 输出的 `database_id`，下一步填进 *wrangler.toml*。
 
 ### 3. 配置环境变量（Secrets）
 
@@ -162,8 +183,8 @@ wrangler secret put ADMIN_TOKEN
 wrangler secret put BANGUMI_OAUTH_CLIENT_SECRET
 ```
 
-2. 将 *wrangler.toml.example* 修改为 *wrangler.toml*  
-一般而言不需要修改，如果你想可以改一下 `BANGUMI_USER_AGENT`、`r2_buckets.bucket_name`  
+2. 将 *wrangler.toml.example* 修改为 *wrangler.toml*，把上一步的 `database_id` 填进 `[[d1_databases]]`  
+其余一般不需要修改，如果你想可以改一下 `BANGUMI_USER_AGENT`、`r2_buckets.bucket_name`  
 如果你有自定义域名，可以新增一块：
 
 ```text
@@ -173,6 +194,12 @@ custom_domain = true
 ```
 
 ### 4. 部署项目
+
+第一次部署前先建表（弹幕、设置同步和每周收藏人数都依赖这些表）：
+
+```bash
+wrangler d1 migrations apply melon-api --remote
+```
 
 ```bash
 pnpm install
@@ -187,6 +214,11 @@ wrangler deploy
 
 ### 5.（可选）本地开发
 
+本地的 R2 和 D1 是模拟的，第一次先在本地建表：
+
 ```bash
+wrangler d1 migrations apply melon-api --local
 pnpm dev
 ```
+
+用 `pnpm dev --test-scheduled` 启动时，可以访问 `/__scheduled?cron=*/15+*+*+*+*` 手动触发定时任务。
