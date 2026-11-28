@@ -57,7 +57,7 @@ export async function getOrSetJson<T>(
           )).toISOString(),
         };
       }
-      if (Date.parse(cached.expiresAt) > Date.now()) {
+      if (Date.parse(cached.expiresAt) - (policy.refreshAheadSeconds ?? 0) * 1000 > Date.now()) {
         return result(key, cached, true);
       }
       stale = cached;
@@ -148,7 +148,7 @@ async function loadFresh<T>(
   }
 }
 
-export async function readJson<T>(
+async function readJson<T>(
   env: Env,
   key: string,
   options: { allowExpired?: boolean } = {},
@@ -165,7 +165,7 @@ export async function readJson<T>(
         if (newer && Date.parse(newer.cachedAt) > Date.parse(stored.cachedAt)) {
           return newer;
         }
-        remember(key, stored);
+        remember(key, stored, object.size);
         return stored;
       })();
       pendingReads.set(key, pending);
@@ -180,19 +180,19 @@ export async function readJson<T>(
   if (!options.allowExpired && Date.parse(envelope.expiresAt) <= Date.now()) {
     return null;
   }
-  remember(key, envelope);
+  touch(key);
   return envelope;
 }
 
-export async function writeJson<T>(
+async function writeJson<T>(
   env: Env,
   key: string,
   envelope: CacheEnvelope<T>,
 ): Promise<void> {
   envelope.revision ??= crypto.randomUUID();
-  remember(key, envelope);
+  const stored = new TextEncoder().encode(JSON.stringify(envelope));
+  remember(key, envelope, stored.byteLength);
   if (!env.CACHE_BUCKET) return;
-  const stored = JSON.stringify(envelope);
   const previous = pendingWrites.get(key) ?? Promise.resolve();
   const writing = previous.catch(() => {}).then(() => env.CACHE_BUCKET!.put(key, stored, {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
@@ -206,14 +206,17 @@ export async function writeJson<T>(
   }
 }
 
-function remember(key: string, envelope: CacheEnvelope<unknown>): void {
-  if (memoryCache.get(key) === envelope) {
-    memoryCache.delete(key);
-    memoryCache.set(key, envelope);
-    return;
-  }
+/** Moves [key] to the most recently used end. */
+function touch(key: string): void {
+  const envelope = memoryCache.get(key);
+  if (!envelope) return;
+  memoryCache.delete(key);
+  memoryCache.set(key, envelope);
+}
+
+/** Keeps [envelope] in memory, counting its stored size toward the limit. */
+function remember(key: string, envelope: CacheEnvelope<unknown>, bytes: number): void {
   forget(key);
-  const bytes = new TextEncoder().encode(JSON.stringify(envelope)).byteLength;
   if (bytes > MAX_MEMORY_CACHE_BYTES) return;
   memoryCache.set(key, envelope);
   memorySizes.set(key, bytes);
@@ -231,7 +234,7 @@ function forget(key: string): void {
   memoryCache.delete(key);
 }
 
-export function cacheEtag(key: string, cachedAt: string, revision?: string): string {
+function cacheEtag(key: string, cachedAt: string, revision?: string): string {
   let hash = 2166136261;
   for (let i = 0; i < key.length; i++) hash = Math.imul(hash ^ key.charCodeAt(i), 16777619);
   return `W/"${revision ?? `${(hash >>> 0).toString(36)}-${Date.parse(cachedAt).toString(36)}`}"`;

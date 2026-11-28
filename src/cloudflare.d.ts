@@ -1,12 +1,19 @@
-interface R2ObjectBody {
+interface R2Object {
   key: string;
+  etag: string;
+  size: number;
   customMetadata?: Record<string, string>;
+}
+
+interface R2ObjectBody extends R2Object {
+  body: ReadableStream;
   json<T = unknown>(): Promise<T>;
 }
 
-interface R2Object {
-  key: string;
-  customMetadata?: Record<string, string>;
+/** A conditional read or write: [etagMatches] for compare-and-swap. */
+interface R2Conditional {
+  etagMatches?: string;
+  etagDoesNotMatch?: string;
 }
 
 interface R2Objects {
@@ -17,14 +24,18 @@ interface R2Objects {
 
 interface R2Bucket {
   get(key: string): Promise<R2ObjectBody | null>;
+  /** Without the body when [onlyIf] fails. */
+  get(key: string, options: { onlyIf: R2Conditional }): Promise<R2ObjectBody | R2Object | null>;
+  /** Null when [onlyIf] fails. */
   put(
     key: string,
-    value: string | ArrayBuffer | ReadableStream,
+    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
     options?: {
       httpMetadata?: { contentType?: string };
       customMetadata?: Record<string, string>;
+      onlyIf?: R2Conditional;
     },
-  ): Promise<void>;
+  ): Promise<R2Object | null>;
   delete(key: string | string[]): Promise<void>;
   list(options?: {
     cursor?: string;

@@ -1,30 +1,25 @@
 import { bangumiToken } from "./auth";
-import { BangumiClient } from "./bangumi";
-import { cacheKey, cacheHeaders, cleanupExpiredCacheObjects, getOrSetJson, matchesEtag, queryCacheKey, type CacheResult } from "./cache";
+import { matchesEtag } from "./cache";
+import {
+  getHeat,
+  getSchedule,
+  getSeason,
+  getSubjectAliases,
+  getTodaySchedule,
+  refreshLive,
+  refreshMaterializedCaches,
+} from "./catalogue";
 import { danmakuQuota, listDanmaku, sendDanmaku } from "./danmaku";
+import { edgeCached } from "./edge";
 import { docsHtml, openApiSpec } from "./openapi";
 import { sourceRules } from "./sources";
 import { deleteSettings, getSettings, putSettings } from "./sync";
-import { loadSeasonCatalogue } from "./seasons";
-import { FetchBudget, weekOf } from "./schedule_subjects";
-import {
-  buildScheduleResponse,
-  loadSubjectAliases,
-  loadBangumiData,
-} from "./schedule";
-import { HttpError, type Env, type ScheduleResponse } from "./types";
-import {
-  boolParam,
-  clampInt,
-  currentShanghaiDate,
-  dateParam,
-  errorJson,
-  json,
-  parseSeason,
-  preflightResponse,
-  requireAdmin,
-  seasonDateRange,
-} from "./utils";
+import { HttpError, type Env } from "./types";
+import { boolParam, errorJson, json, preflightResponse, requireAdmin } from "./utils";
+
+// wrangler.toml's crons: the daily one refreshes season lists and
+// bangumi-data, the 15-minute one heat and the schedules clients open.
+const DAILY_CRON = "0 16 * * *";
 
 export default {
   async fetch(
@@ -67,7 +62,7 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    ctx.waitUntil(event.cron === DAILY_CRON ? refreshMaterializedCaches(env) : refreshSchedules(env));
+    ctx.waitUntil(event.cron === DAILY_CRON ? refreshMaterializedCaches(env) : refreshLive(env));
   },
 };
 
@@ -82,7 +77,8 @@ async function route(
   if (id && (!Number.isSafeInteger(Number(id)) || Number(id) <= 0)) {
     throw new HttpError(400, "INVALID_PARAMETER", "Resource IDs must be positive safe integers.");
   }
-  if (request.method === "GET" && boolParam(url.searchParams.get("force"))) {
+  const force = request.method === "GET" && boolParam(url.searchParams.get("force"));
+  if (force) {
     const rejected = requireAdmin(request, env);
     if (rejected) return rejected;
   }
@@ -119,16 +115,10 @@ async function route(
       headers: { "cache-control": "public, max-age=3600" },
     });
 
-  if (request.method === "GET" && /^v1\/subjects\/\d+\/aliases$/.test(path))
-    return getSubjectAliases(Number(path.split("/")[2]), url, env, ctx);
-  if (request.method === "GET" && path === "v1/schedule/latest")
-    return getSchedule(url, env, ctx);
-  if (request.method === "GET" && path === "v1/schedule/today")
-    return getTodaySchedule(url, env, ctx);
-  if (request.method === "GET" && path === "v1/seasons/current")
-    return getSeason(url, env, "current", ctx);
-  if (request.method === "GET" && path === "v1/trending/current")
-    return getSeason(url, env, "trending", ctx);
+  if (request.method === "GET") {
+    const read = catalogueRead(path, url, env, ctx);
+    if (read) return edgeCached(url, ctx, force, read);
+  }
   if (request.method === "POST" && path === "v1/internal/refresh") {
     const rejected = requireAdmin(request, env);
     if (rejected) return rejected;
@@ -142,165 +132,23 @@ async function route(
   return errorJson(404, "NOT_FOUND", `No route for ${request.method} /${path}`);
 }
 
-async function getSchedule(
+/** The catalogue reads, which the edge keeps while fresh. */
+function catalogueRead(
+  path: string,
   url: URL,
   env: Env,
   ctx: ExecutionContext,
-): Promise<Response> {
-  const view = url.searchParams.get("view") ?? "both";
-  if (!["both", "items", "byDate"].includes(view)) throw new HttpError(400, "INVALID_PARAMETER", "Unknown schedule view.");
-  const result = await getScheduleCached(url, env, false, ctx);
-  const { items, ...metadata } = result.value;
-  const byDate: NonNullable<ScheduleResponse["byDate"]> = {};
-  if (view !== "items") {
-    for (const item of items) (byDate[item.airingAtShanghai.slice(0, 10)] ??= []).push(item);
-  }
-  const cache = { ...result.cache, etag: `${result.cache.etag.slice(0, -1)}-${view}"` };
-  return cachedJson({ ...metadata, ...(view !== "byDate" ? { items } : {}), ...(view !== "items" ? { byDate } : {}), cache }, cache);
-}
-
-async function getTodaySchedule(
-  url: URL,
-  env: Env,
-  ctx: ExecutionContext,
-): Promise<Response> {
-  const schedule = await getScheduleCached(url, env, false, ctx, 0);
-  const today = currentShanghaiDate();
-  return cachedJson({
-    generatedAt: schedule.value.generatedAt,
-    date: today,
-    items: schedule.value.items.filter((item) => item.airingAtShanghai.startsWith(today)),
-    cache: schedule.cache,
-  }, schedule.cache);
-}
-
-async function getSeason(
-  url: URL,
-  env: Env,
-  mode: "current" | "trending",
-  ctx: ExecutionContext,
-): Promise<Response> {
-  const season = parseSeason(url.searchParams.get("season"));
-  const range = seasonDateRange(season);
-  const limit = clampInt(url.searchParams.get("limit"), 100, 1, 100);
-  const offset = clampInt(url.searchParams.get("offset"), 0, 0, 5000);
-  const sort = mode === "trending" ? "heat" : url.searchParams.get("sort") ?? "rank";
-  if (sort !== "heat" && sort !== "rank") throw new HttpError(400, "INVALID_PARAMETER", "Season lists sort by heat or rank.");
-  const result = await loadSeasonCatalogue(env, season, sort, boolParam(url.searchParams.get("includeNsfw")),
-    boolParam(url.searchParams.get("force")), (task) => ctx.waitUntil(task));
-  const cache = { ...result.cache, etag: `${result.cache.etag.slice(0, -1)}-${mode}-${limit}-${offset}"` };
-  const total = result.value.total;
-  return cachedJson({
-    season, range, total, limit, offset,
-    hasMore: offset + limit < total && offset + limit <= 5000,
-    data: result.value.data.slice(offset, offset + limit), cache,
-  }, cache);
-}
-
-async function getSubjectAliases(
-  subjectId: number,
-  url: URL,
-  env: Env,
-  ctx: ExecutionContext,
-): Promise<Response> {
-  const force = boolParam(url.searchParams.get("force"));
-  // Every subject page asks for its aliases; the edge answers repeats
-  // without reading R2 or loading bangumi-data into a fresh isolate.
-  const edge = new Request(`${url.origin}/v1/subjects/${subjectId}/aliases`);
-  const hit = force ? undefined : await caches.default.match(edge);
-  if (hit) return hit;
-  const background = (task: Promise<unknown>) => ctx.waitUntil(task);
-  const result = await getOrSetJson(env, cacheKey(["subjects", subjectId, "aliases-v1"]),
-    { ttlSeconds: 24 * 60 * 60, force },
-    () => loadSubjectAliases(env, subjectId, force, background), background);
-  const fresh = Math.floor((Date.parse(result.cache.expiresAt) - Date.now()) / 1000);
-  const response = cachedJson({ data: result.value, cache: result.cache }, result.cache,
-    fresh > 0 && !result.cache.stale ? { "cache-control": `public, max-age=${fresh}` } : {});
-  if (fresh > 0 && !result.cache.stale) ctx.waitUntil(caches.default.put(edge, response.clone()));
-  return response;
-}
-
-// wrangler.toml's crons: the daily one refreshes season lists and
-// bangumi-data, the half-hourly one the schedules clients open.
-const DAILY_CRON = "0 16 * * *";
-
-async function refreshMaterializedCaches(env: Env): Promise<void> {
-  const current = parseSeason(null);
-  const previous = parseSeason(current.quarter === 1
-    ? `${current.year - 1}Q4` : `${current.year}Q${current.quarter - 1}`);
-  const client = new BangumiClient(env);
-  await Promise.all([
-    ...[current, previous].flatMap((season) => [
-      loadSeasonCatalogue(env, season, "heat", false, true),
-      loadSeasonCatalogue(env, season, "rank", false, true),
-      loadSeasonCatalogue(env, season, "rank", true, true),
-    ]),
-    loadBangumiData(env, true),
-    getOrSetJson(env, "source/calendar", { ttlSeconds: 3600, force: true }, () => client.getCalendarSubjects()),
-  ]);
-  await cleanupExpiredCacheObjects(env);
-}
-
-/**
- * Rebuilds today's schedule, the next seven days and this and next
- * Monday-start week, one after another so they share a budget of Bangumi
- * requests: what one window fetches, the next reads from the store.
- */
-async function refreshSchedules(env: Env): Promise<void> {
-  const today = currentShanghaiDate();
-  const monday = weekOf(today);
-  const nextMonday = new Date(Date.parse(`${monday}T00:00:00Z`) + 7 * 86400 * 1000).toISOString().slice(0, 10);
-  const budget = new FetchBudget(40);
-  for (const query of [`startDate=${monday}&dayCount=7`, `startDate=${today}&dayCount=7`, "days=0", `startDate=${nextMonday}&dayCount=7`]) {
-    await getScheduleCached(new URL(`https://melon-api.local?${query}`), env, true, undefined, 7, budget);
-  }
-}
-
-async function getScheduleCached(
-  url: URL,
-  env: Env,
-  forceOverride = false,
-  ctx?: ExecutionContext,
-  defaultDays = 7,
-  // A request's share of its 50 external requests; the rest covers
-  // bangumi-data, the Bangumi calendar and season lists.
-  budget = new FetchBudget(30),
-): Promise<Awaited<ReturnType<typeof getOrSetJson<ScheduleResponse>>>> {
-  const days = clampInt(url.searchParams.get("days"), defaultDays, 0, 31);
-  const date = dateParam(url.searchParams.get("date"));
-  const startDate = url.searchParams.has("startDate") ? dateParam(url.searchParams.get("startDate")) : undefined;
-  if (!startDate && url.searchParams.has("dayCount")) throw new HttpError(400, "INVALID_PARAMETER", "dayCount requires startDate.");
-  const dayCount = startDate ? clampInt(url.searchParams.get("dayCount"), 7, 1, 63) : undefined;
-  const requireBroadcast = boolParam(url.searchParams.get("requireBroadcast"));
-  const includeNsfw = boolParam(url.searchParams.get("includeNsfw"));
-  const includeUnknownNsfw = boolParam(url.searchParams.get("includeUnknownNsfw"), true);
-  const force = boolParam(url.searchParams.get("force"));
-  const key = queryCacheKey("schedule-v4", { ...(startDate ? { startDate, dayCount } : { date, days }), requireBroadcast, includeNsfw, includeUnknownNsfw });
-  return getOrSetJson(
-    env,
-    key,
-    {
-      // An hour keeps new collections current; a window still missing
-      // details asks again within a minute, when more have been fetched.
-      ttlSeconds: (value: ScheduleResponse) => value.incomplete ? 60 : 60 * 60,
-      force: forceOverride || force,
-      staleWhileRevalidateSeconds: 24 * 60 * 60,
-    },
-    () =>
-      buildScheduleResponse(
-        env,
-        { days, date, startDate, dayCount, force, requireBroadcast, includeNsfw, includeUnknownNsfw },
-        budget,
-        ctx ? (task) => ctx.waitUntil(task) : undefined,
-      ),
-    ctx ? (task) => ctx.waitUntil(task) : undefined,
-  );
+): (() => Promise<Response>) | undefined {
+  if (/^v1\/subjects\/\d+\/aliases$/.test(path))
+    return () => getSubjectAliases(Number(path.split("/")[2]), url, env, ctx);
+  if (path === "v1/schedule/latest") return () => getSchedule(url, env, ctx);
+  if (path === "v1/schedule/today") return () => getTodaySchedule(url, env, ctx);
+  if (path === "v1/schedule/heat") return () => getHeat(url, env, ctx);
+  if (path === "v1/seasons/current") return () => getSeason(url, env, "current", ctx);
+  if (path === "v1/trending/current") return () => getSeason(url, env, "trending", ctx);
+  return undefined;
 }
 
 function trimPath(pathname: string): string {
   return pathname.replace(/^\/+|\/+$/g, "");
-}
-
-function cachedJson(data: unknown, cache: CacheResult<unknown>["cache"], headers: Record<string, string> = {}): Response {
-  return json(data, { headers: { ...cacheHeaders(cache), ...headers } });
 }

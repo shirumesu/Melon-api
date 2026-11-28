@@ -17,6 +17,8 @@ export type CachePolicy<T = unknown> = {
   force?: boolean;
   staleWhileRevalidateSeconds?: number;
   maxStaleSeconds?: number;
+  /** Refreshes an entry that expires within this many seconds, as the cron does before the next run. */
+  refreshAheadSeconds?: number;
 };
 
 export type Paged<T> = {

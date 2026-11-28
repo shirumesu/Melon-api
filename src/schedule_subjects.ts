@@ -1,18 +1,36 @@
 import { BangumiClient, mapLimit } from "./bangumi";
-import { readJson, writeJson } from "./cache";
-import { HttpError, type EpisodeBrief, type Env, type SubjectListItem } from "./types";
-import { shanghaiDateString } from "./utils";
+import type { Airing } from "./bangumi_data";
+import { cacheKey, getOrSetJson } from "./cache";
+import { HttpError, type EpisodeBrief, type Env, type ScheduleOccurrence, type SubjectListItem } from "./types";
 
 const STORE_KEY = "schedule/subjects-v1";
-const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
-const BRIEF_TTL_MS = 6 * HOUR_MS;
-const EPISODES_TTL_MS = 12 * HOUR_MS;
+const JST_OFFSET_MS = 9 * HOUR_MS;
+
+/** How often the cron in wrangler.toml runs. */
+export const CRON_INTERVAL_SECONDS = 15 * 60;
+const CRON_INTERVAL_MS = CRON_INTERVAL_SECONDS * 1000;
+
+/**
+ * Most airing subjects' details and counts come from the list of anime
+ * premiering in their month, one request for up to a hundred, kept this
+ * fresh; a month joins once this many of a window's subjects premiered in it.
+ */
+const MONTH_TTL_SECONDS = 30 * 60;
+const MONTH_MIN_SUBJECTS = 3;
+/** Details of a subject outside those lists, such as a year-round show. */
+const BRIEF_TTL_MS = 2 * HOUR_MS;
+/** Episodes while one aired today or yesterday (Japan), within three days, and otherwise. */
+const EPISODES_TTL_MS = [HOUR_MS, 3 * HOUR_MS, 12 * HOUR_MS] as const;
 // Entries no schedule asked for in three weeks are dropped.
 const RETENTION_MS = 21 * DAY_MS;
 // Episodes kept around now: enough to match the weeks clients browse.
 const EPISODES_BEFORE_MS = 42 * DAY_MS;
 const EPISODES_AFTER_MS = 21 * DAY_MS;
+/** How long an isolate uses its copy of the store before asking R2 whether it changed. */
+const STORE_RECHECK_MS = MINUTE_MS;
 
 /** What melon-api last fetched of one airing subject. */
 export type ScheduleSubject = {
@@ -40,58 +58,154 @@ export class FetchBudget {
     this.left--;
     return true;
   }
+
+  /** Spends what is left, as when Bangumi asks to slow down. */
+  stop(): void {
+    this.left = 0;
+  }
+}
+
+/** A load the invocation's [FetchBudget] could not pay for. */
+export class BudgetSpent extends Error {
+  constructor() {
+    super("This invocation has used its share of Bangumi requests.");
+  }
+}
+
+/**
+ * The cron refreshes whatever falls due before its next run; a request
+ * fetches what is missing, and what is overdue by more than a run, as when
+ * the cron stops.
+ */
+export type RefreshMode = "cron" | "request";
+
+function due(at: number | undefined, ttl: number, now: number, mode: RefreshMode): boolean {
+  return at == null || now - at > ttl + (mode === "cron" ? -CRON_INTERVAL_MS : CRON_INTERVAL_MS);
+}
+
+/**
+ * Everything known of [ids], which [airing] describes: details and counts
+ * from their premiere months' lists where those hold them, otherwise from
+ * each subject's own; and episodes. What is missing or due is fetched first,
+ * as far as [budget] allows.
+ */
+export async function loadAiringSubjects(
+  env: Env,
+  airing: Map<number, Airing>,
+  ids: number[],
+  budget: FetchBudget,
+  mode: RefreshMode,
+  background?: (task: Promise<unknown>) => void,
+): Promise<Map<number, ScheduleSubject>> {
+  const lists = await Promise.all(premiereMonths(airing, ids).map((month) =>
+    loadPremiereMonth(env, month, budget, mode, background).catch((error) => {
+      // Its subjects then wait for their own details, counted as incomplete.
+      if (!(error instanceof BudgetSpent)) console.warn(`Premiere month ${month} unavailable`, error);
+      return null;
+    })));
+  const listed: Listed = new Map();
+  for (const list of lists) {
+    for (const brief of list?.items ?? []) listed.set(brief.subjectId, { brief, at: list!.at });
+  }
+  const run = storeQueue.then(() => refresh(env, ids, listed, budget, mode));
+  storeQueue = run.catch(() => undefined);
+  return run;
+}
+
+type Listed = Map<number, { brief: SubjectListItem; at: number }>;
+
+/** The months, `YYYY-MM`, in which at least [MONTH_MIN_SUBJECTS] of [ids] premiered. */
+function premiereMonths(airing: Map<number, Airing>, ids: number[]): string[] {
+  const counts = new Map<string, number>();
+  for (const id of ids) {
+    const month = airing.get(id)?.premiere?.slice(0, 7);
+    if (month) counts.set(month, (counts.get(month) ?? 0) + 1);
+  }
+  return [...counts].filter(([, count]) => count >= MONTH_MIN_SUBJECTS).map(([month]) => month);
+}
+
+async function loadPremiereMonth(
+  env: Env,
+  month: string,
+  budget: FetchBudget,
+  mode: RefreshMode,
+  background?: (task: Promise<unknown>) => void,
+): Promise<{ items: SubjectListItem[]; at: number }> {
+  const result = await getOrSetJson(
+    env,
+    cacheKey(["premiere-month-v1", month]),
+    {
+      ttlSeconds: MONTH_TTL_SECONDS,
+      staleWhileRevalidateSeconds: 7 * 24 * 60 * 60,
+      refreshAheadSeconds: mode === "cron" ? CRON_INTERVAL_SECONDS : undefined,
+    },
+    async () => {
+      const client = new BangumiClient(env, AbortSignal.timeout(20_000));
+      const items: SubjectListItem[] = [];
+      for (;;) {
+        if (!budget.take()) throw new BudgetSpent();
+        const page = await client.browseMonth(month, items.length).catch((error) => {
+          if (error instanceof HttpError && error.status === 429) budget.stop();
+          throw error;
+        });
+        items.push(...page.data.map(slim));
+        if (page.data.length === 0 || items.length >= page.total) return items;
+      }
+    },
+    background,
+  );
+  return { items: result.value, at: Date.parse(result.cache.cachedAt) };
 }
 
 let storeQueue: Promise<unknown> = Promise.resolve();
 
 /**
- * The stored details of [subjectIds], first fetching what is missing or
- * out of date as far as [budget] allows: missing details first, then
- * missing episodes, then the oldest. One stored object holds every
- * subject, so a schedule reads it once; updates in one isolate run in turn.
+ * The store's entries for [ids], first fetching what is missing or due:
+ * missing details first, then missing episodes, then the most overdue. One
+ * stored object holds every subject, so a schedule reads it once; updates
+ * in one isolate run in turn, and ones racing in other isolates merge.
  */
-export function loadScheduleSubjects(
-  env: Env,
-  subjectIds: number[],
-  budget: FetchBudget,
-): Promise<Map<number, ScheduleSubject>> {
-  const run = storeQueue.then(() => refresh(env, subjectIds, budget));
-  storeQueue = run.catch(() => undefined);
-  return run;
-}
-
 async function refresh(
   env: Env,
-  subjectIds: number[],
+  ids: number[],
+  listed: Listed,
   budget: FetchBudget,
+  mode: RefreshMode,
 ): Promise<Map<number, ScheduleSubject>> {
   const now = Date.now();
-  const stored = await readJson<Record<string, ScheduleSubject>>(env, STORE_KEY, { allowExpired: true });
+  const base = await readStore(env);
   const store = new Map<number, ScheduleSubject>();
-  for (const [id, entry] of Object.entries(stored?.value ?? {})) {
+  for (const [id, entry] of Object.entries(base.value)) {
     if (now - entry.usedAt <= RETENTION_MS) store.set(Number(id), { ...entry });
   }
-  for (const id of subjectIds) {
-    const entry = store.get(id);
-    store.set(id, entry ? { ...entry, usedAt: now } : { usedAt: now });
+  let changed = store.size !== Object.keys(base.value).length;
+  for (const id of ids) {
+    const entry = store.get(id) ?? { usedAt: now };
+    entry.usedAt = now;
+    // A listed subject's own details would only go stale.
+    if (listed.has(id) && entry.briefAt != null) {
+      delete entry.brief;
+      delete entry.briefAt;
+      changed = true;
+    }
+    store.set(id, entry);
   }
 
-  const jobs = subjectIds
+  const jobs = ids
     .flatMap((id) => {
       const entry = store.get(id)!;
       return [
-        { id, kind: "brief" as const, at: entry.briefAt, ttl: BRIEF_TTL_MS },
-        { id, kind: "episodes" as const, at: entry.episodesAt, ttl: EPISODES_TTL_MS },
+        ...(listed.has(id) ? [] : [{ id, kind: "brief" as const, at: entry.briefAt, ttl: BRIEF_TTL_MS }]),
+        { id, kind: "episodes" as const, at: entry.episodesAt, ttl: episodesTtl(entry, now) },
       ];
     })
-    .filter((job) => job.at == null || now - job.at > job.ttl)
+    .filter((job) => due(job.at, job.ttl, now, mode))
     .sort((a, b) =>
       Number(a.at != null) - Number(b.at != null) ||
       Number(a.kind === "episodes") - Number(b.kind === "episodes") ||
-      (a.at ?? 0) - (b.at ?? 0));
+      (a.at ?? 0) + a.ttl - ((b.at ?? 0) + b.ttl));
 
   const client = new BangumiClient(env, AbortSignal.timeout(20_000));
-  let changed = false;
   // Six at a time: a Worker keeps at most six connections open.
   await mapLimit(jobs, 6, async (job) => {
     if (!budget.take()) return;
@@ -100,27 +214,9 @@ async function refresh(
       if (job.kind === "brief") {
         entry.brief = slim(await client.getSubject(job.id));
         entry.briefAt = Date.now();
-        changed = true;
-        return;
+      } else {
+        await fetchEpisodes(client, job.id, entry, budget);
       }
-      const count = entry.episodeCount;
-      let page = await client.getMainEpisodes(job.id, count ? Math.max(0, count - 100) : 0);
-      if (page.total > 100 && count !== page.total) {
-        // The newest episodes are the last page; without the budget for it
-        // the count still lets the next request fetch it directly.
-        entry.episodeCount = page.total;
-        changed = true;
-        if (!budget.take()) return;
-        page = await client.getMainEpisodes(job.id, page.total - 100);
-      }
-      const fetched = Date.now();
-      entry.episodes = page.data.filter((episode) => {
-        const day = Date.parse(`${episode.airdate}T00:00:00+09:00`);
-        return day >= fetched - EPISODES_BEFORE_MS && day <= fetched + EPISODES_AFTER_MS;
-      });
-      entry.episodeCount = page.total;
-      entry.lastSort = page.data.reduce((last, episode) => Math.max(last, episode.sort), 0) || undefined;
-      entry.episodesAt = fetched;
       changed = true;
     } catch (error) {
       // A subject Bangumi no longer has waits like a fetched one; any other
@@ -132,19 +228,125 @@ async function refresh(
         changed = true;
         return;
       }
+      if (error instanceof HttpError && error.status === 429) budget.stop();
       console.warn(`Schedule subject ${job.id} ${job.kind} unavailable`, error);
     }
   });
 
-  if (changed || store.size !== Object.keys(stored?.value ?? {}).length) {
-    await writeJson(env, STORE_KEY, {
-      value: Object.fromEntries(store),
-      cachedAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + RETENTION_MS).toISOString(),
-    });
+  const saved = changed ? await writeStore(env, base, Object.fromEntries(store)) : base.value;
+  return new Map(ids.map((id) => {
+    const entry = saved[id] ?? store.get(id)!;
+    const list = listed.get(id);
+    return [id, list ? { ...entry, brief: list.brief, briefAt: list.at } : entry];
+  }));
+}
+
+/** Episodes refresh hourly around a new one, while its comments pile up. */
+function episodesTtl(entry: ScheduleSubject, now: number): number {
+  const today = japanDate(now);
+  const latest = (entry.episodes ?? []).reduce((last, episode) =>
+    episode.airdate <= today && episode.airdate > last ? episode.airdate : last, "");
+  if (!latest) return EPISODES_TTL_MS[2];
+  const days = (Date.parse(today) - Date.parse(latest)) / DAY_MS;
+  return days <= 1 ? EPISODES_TTL_MS[0] : days <= 3 ? EPISODES_TTL_MS[1] : EPISODES_TTL_MS[2];
+}
+
+async function fetchEpisodes(client: BangumiClient, id: number, entry: ScheduleSubject, budget: FetchBudget) {
+  const count = entry.episodeCount;
+  let page = await client.getMainEpisodes(id, count ? Math.max(0, count - 100) : 0);
+  if (page.total > 100 && count !== page.total) {
+    // The newest episodes are the last page; without the budget for it
+    // the count still lets the next request fetch it directly.
+    entry.episodeCount = page.total;
+    if (!budget.take()) return;
+    page = await client.getMainEpisodes(id, page.total - 100);
   }
-  if (changed) await recordSnapshots(env, store);
-  return store;
+  const fetched = Date.now();
+  entry.episodes = page.data.filter((episode) => {
+    const day = Date.parse(`${episode.airdate}T00:00:00+09:00`);
+    return day >= fetched - EPISODES_BEFORE_MS && day <= fetched + EPISODES_AFTER_MS;
+  });
+  entry.episodeCount = page.total;
+  entry.lastSort = page.data.reduce((last, episode) => Math.max(last, episode.sort), 0) || undefined;
+  entry.episodesAt = fetched;
+}
+
+type StoreValue = Record<string, ScheduleSubject>;
+type StoreCopy = { value: StoreValue; etag?: string; checkedAt: number };
+let storeCopy: StoreCopy | undefined;
+
+/** The stored subjects, from memory while recently checked against R2. */
+async function readStore(env: Env): Promise<StoreCopy> {
+  const now = Date.now();
+  if (storeCopy && now - storeCopy.checkedAt < STORE_RECHECK_MS) return storeCopy;
+  const bucket = env.CACHE_BUCKET;
+  if (!bucket) return storeCopy = { value: storeCopy?.value ?? {}, checkedAt: now };
+  const known = storeCopy;
+  const object = known?.etag
+    ? await bucket.get(STORE_KEY, { onlyIf: { etagDoesNotMatch: known.etag } })
+    : await bucket.get(STORE_KEY);
+  if (!object) return storeCopy = { value: {}, checkedAt: now };
+  // Without a body R2 says the copy is current.
+  if (!("body" in object)) return storeCopy = { ...known!, checkedAt: now };
+  const stored = await (object as R2ObjectBody).json<{ value: StoreValue }>();
+  return storeCopy = { value: stored.value, etag: object.etag, checkedAt: now };
+}
+
+/**
+ * Writes [value] over [base] unless another isolate wrote since, in which
+ * case it merges onto that copy, keeping each subject's newer details and
+ * episodes, and tries again.
+ */
+async function writeStore(env: Env, base: StoreCopy, value: StoreValue): Promise<StoreValue> {
+  const bucket = env.CACHE_BUCKET;
+  if (!bucket) {
+    storeCopy = { value, checkedAt: Date.now() };
+    return value;
+  }
+  let current = base;
+  let next = value;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const now = Date.now();
+    const cachedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + RETENTION_MS).toISOString();
+    const written = await bucket.put(STORE_KEY, JSON.stringify({ value: next, cachedAt, expiresAt }), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { cachedAt, expiresAt },
+      ...(current.etag ? { onlyIf: { etagMatches: current.etag } } : {}),
+    });
+    if (written) {
+      storeCopy = { value: next, etag: written.etag, checkedAt: now };
+      return next;
+    }
+    storeCopy = undefined;
+    current = await readStore(env);
+    next = mergeStores(current.value, next, now);
+  }
+  throw new Error("The schedule store kept changing while being written.");
+}
+
+function mergeStores(theirs: StoreValue, mine: StoreValue, now: number): StoreValue {
+  const merged: StoreValue = {};
+  for (const id of new Set([...Object.keys(theirs), ...Object.keys(mine)])) {
+    const a = theirs[id], b = mine[id];
+    const entry = a && b ? mergeEntries(a, b) : (a ?? b)!;
+    if (now - entry.usedAt <= RETENTION_MS) merged[id] = entry;
+  }
+  return merged;
+}
+
+function mergeEntries(a: ScheduleSubject, b: ScheduleSubject): ScheduleSubject {
+  const details = (a.briefAt ?? 0) >= (b.briefAt ?? 0) ? a : b;
+  const episodes = (a.episodesAt ?? 0) >= (b.episodesAt ?? 0) ? a : b;
+  return {
+    brief: details.brief,
+    briefAt: details.briefAt,
+    episodes: episodes.episodes,
+    episodesAt: episodes.episodesAt,
+    episodeCount: episodes.episodeCount,
+    lastSort: episodes.lastSort,
+    usedAt: Math.max(a.usedAt, b.usedAt),
+  };
 }
 
 /** A schedule's share of the details: a short summary and the leading tags. */
@@ -168,6 +370,65 @@ export function pending(entry: ScheduleSubject | undefined): boolean {
   return entry?.briefAt == null || entry.episodesAt == null;
 }
 
+/**
+ * The main episode dated the broadcast's day in Japan, or a day either
+ * side (Bangumi dates episodes where they first air); the nearest wins.
+ */
+export function matchEpisode(subject: ScheduleSubject, broadcast: Date): EpisodeBrief | undefined {
+  const day = Date.parse(japanDate(broadcast.getTime()));
+  let best: { distance: number; episode: EpisodeBrief } | undefined;
+  for (const episode of subject.episodes ?? []) {
+    const distance = Math.abs(Date.parse(episode.airdate) - day);
+    if (distance > DAY_MS) continue;
+    if (!best || distance < best.distance || (distance === best.distance && episode.sort < best.episode.sort)) {
+      best = { distance, episode };
+    }
+  }
+  return best?.episode;
+}
+
+/**
+ * [matchEpisode], and whether it is the final one: the last listed, reaching
+ * the planned count of at most 60, which year-round shows do not have.
+ */
+export function airingEpisode(
+  subject: ScheduleSubject,
+  broadcast: Date,
+  episodeTotal: number | undefined,
+): ScheduleOccurrence["episode"] {
+  const episode = matchEpisode(subject, broadcast);
+  if (!episode) return undefined;
+  const number = episode.ep ?? episode.sort;
+  const final = episodeTotal != null && episodeTotal <= 60 && number >= episodeTotal &&
+    episode.sort === subject.lastSort;
+  return { ...episode, final };
+}
+
+/** The main episode before [episode], by sort. */
+export function previousEpisode(subject: ScheduleSubject, episode: EpisodeBrief): EpisodeBrief | undefined {
+  let best: EpisodeBrief | undefined;
+  for (const other of subject.episodes ?? []) {
+    if (other.sort < episode.sort && (!best || other.sort > best.sort)) best = other;
+  }
+  return best;
+}
+
+/**
+ * The day the next episode airs, when Bangumi dates episodes before and
+ * after this broadcast but none on its day: the show takes this week off.
+ */
+export function breakEnd(subject: ScheduleSubject, broadcast: Date): string | undefined {
+  const day = Date.parse(japanDate(broadcast.getTime()));
+  const dates = (subject.episodes ?? []).map((episode) => episode.airdate).sort();
+  const next = dates.find((date) => Date.parse(date) > day + DAY_MS);
+  return next && dates.some((date) => Date.parse(date) < day - DAY_MS) ? next : undefined;
+}
+
+/** The date, YYYY-MM-DD, in Japan at [time]. */
+function japanDate(time: number): string {
+  return new Date(time + JST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 /** The Monday, YYYY-MM-DD in Shanghai, of the week holding [date]. */
 export function weekOf(date: string): string {
   const [year, month, day] = date.split("-").map(Number);
@@ -176,192 +437,6 @@ export function weekOf(date: string): string {
   return new Date(utc - weekday * DAY_MS).toISOString().slice(0, 10);
 }
 
-function addWeeks(week: string, amount: number): string {
+export function addWeeks(week: string, amount: number): string {
   return new Date(Date.parse(`${week}T00:00:00Z`) + amount * 7 * DAY_MS).toISOString().slice(0, 10);
-}
-
-function collectionTotal(subject: SubjectListItem | undefined): number | undefined {
-  const stats = subject?.collectionStats;
-  return stats && stats.wish + stats.watching + stats.completed + stats.on_hold + stats.dropped;
-}
-
-/**
- * Keeps each subject's collection count the first time this week its
- * details were fresh: the start of the week's new-collection count.
- */
-async function recordSnapshots(env: Env, store: Map<number, ScheduleSubject>): Promise<void> {
-  if (!env.DB) return;
-  const week = weekOf(shanghaiDateString(new Date()));
-  const weekStart = Date.parse(`${week}T00:00:00+08:00`);
-  const statement = env.DB.prepare(
-    "INSERT OR IGNORE INTO collection_snapshots (week, subject, total, recorded) VALUES (?1, ?2, ?3, ?4)",
-  );
-  const rows = [...store].flatMap(([id, entry]) => {
-    const total = collectionTotal(entry.brief);
-    // Details from before the week would start the count early.
-    return total != null && entry.briefAt != null && entry.briefAt >= weekStart
-      ? [statement.bind(week, id, total, Math.floor(entry.briefAt / 1000))]
-      : [];
-  });
-  if (rows.length) await env.DB.batch(rows);
-}
-
-/** What a show's weekly heat counts, and how much of it. */
-const HEAT_PARTS = [
-  { weight: 0.35, value: (show: HeatInput) => show.gain },
-  { weight: 0.35, value: (show: HeatInput) => show.comments },
-  { weight: 0.3, value: (show: HeatInput) => show.watching },
-];
-
-type HeatInput = { id: number; gain?: number; comments: number; watching?: number };
-
-/** A show's heat in a week, and what it was made of. */
-export type ShowHeat = {
-  /** 0 to 100 among the week's shows. */
-  heat: number;
-  /** The week before's; absent for a show that began this week. */
-  previousHeat?: number;
-  /** The episode comments counted (see [weekComments]). */
-  comments: number;
-  /** Collections gained in the week and the week before, once counted. */
-  gain?: number;
-  previousGain?: number;
-};
-
-export type WeeklyHeat = {
-  week: string;
-  /** When the week's collection count began; absent before any was kept. */
-  since?: string;
-  shows: Map<number, ShowHeat>;
-};
-
-/**
- * Each of [subjectIds]' heat in [week] and the week before: collections
- * gained, episode comments and Bangumi users watching, each taken as the
- * square root of its share of the week's highest so one hit does not flatten
- * the rest, then weighted 35/35/30. A show whose gain is not counted yet is
- * scored on the other two. Null for a later week.
- */
-export async function weeklyHeat(
-  env: Env,
-  week: string,
-  store: Map<number, ScheduleSubject>,
-  subjectIds: number[],
-): Promise<WeeklyHeat | null> {
-  const today = shanghaiDateString(new Date());
-  const current = weekOf(today);
-  if (week > current) return null;
-  const counted = env.DB ? await collectionGains(env.DB, week, current, store, subjectIds) : undefined;
-  const shows = subjectIds.flatMap((id) => {
-    const entry = store.get(id);
-    return entry?.brief ? [{ id, entry, brief: entry.brief }] : [];
-  });
-  const previousWeek = addWeeks(week, -1);
-  const comments = new Map(shows.map(({ id, entry }) => [id, weekComments(entry, week, today)]));
-  const heat = heatScores(shows.map(({ id, brief }) => ({
-    id,
-    gain: counted?.gains.get(id)?.gain,
-    comments: comments.get(id)!,
-    watching: brief.collectionStats?.watching,
-  })));
-  const previousHeat = heatScores(shows
-    .filter(({ entry, brief }) => began(entry, brief, week))
-    .map(({ id, entry, brief }) => ({
-      id,
-      gain: counted?.gains.get(id)?.previous,
-      comments: weekComments(entry, previousWeek, today),
-      watching: brief.collectionStats?.watching,
-    })));
-  return {
-    week,
-    ...(counted?.since ? { since: counted.since } : {}),
-    shows: new Map(shows.map(({ id }) => {
-      const gain = counted?.gains.get(id);
-      return [id, {
-        heat: heat.get(id)!,
-        ...(previousHeat.has(id) ? { previousHeat: previousHeat.get(id) } : {}),
-        comments: comments.get(id)!,
-        ...(gain ? { gain: gain.gain, ...(gain.previous != null ? { previousGain: gain.previous } : {}) } : {}),
-      }];
-    })),
-  };
-}
-
-function heatScores(shows: HeatInput[]): Map<number, number> {
-  const parts = HEAT_PARTS.map((part) => ({
-    ...part,
-    top: shows.reduce((top, show) => Math.max(top, part.value(show) ?? 0), 0),
-  }));
-  return new Map(shows.map((show) => {
-    let sum = 0, weights = 0;
-    for (const part of parts) {
-      const value = part.value(show);
-      if (value == null || part.top <= 0) continue;
-      sum += part.weight * Math.sqrt(Math.max(0, value) / part.top);
-      weights += part.weight;
-    }
-    return [show.id, weights ? Math.round((1000 * sum) / weights) / 10 : 0];
-  }));
-}
-
-/**
- * The comments on a show's episode of [week]: the latest one aired by
- * [today], or, while that is under two days old or still to come, the one
- * before it when that has more. None when no episode falls in the week.
- */
-function weekComments(entry: ScheduleSubject, week: string, today: string): number {
-  const end = addWeeks(week, 1);
-  const episodes = (entry.episodes ?? [])
-    .filter((episode) => episode.airdate < end)
-    .sort((a, b) => a.airdate.localeCompare(b.airdate) || a.sort - b.sort);
-  if (!episodes.some((episode) => episode.airdate >= week)) return 0;
-  const aired = episodes.filter((episode) => episode.airdate <= today);
-  const latest = aired.at(-1);
-  if (!latest) return 0;
-  const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - DAY_MS).toISOString().slice(0, 10);
-  const before = aired.at(-2);
-  return latest.airdate >= yesterday && before
-    ? Math.max(latest.comments, before.comments)
-    : latest.comments;
-}
-
-/** Whether a show was airing before [week], so it has a heat then. */
-function began(entry: ScheduleSubject, brief: SubjectListItem, week: string): boolean {
-  return (brief.airDate != null && brief.airDate < week) ||
-    (entry.episodes ?? []).some((episode) => episode.airdate < week);
-}
-
-/**
- * Collections each subject gained in [week]: until now for the current
- * week, between its start and the next week's start for an earlier one;
- * and in the week before. None before any count was kept.
- */
-async function collectionGains(
-  db: D1Database,
-  week: string,
-  current: string,
-  store: Map<number, ScheduleSubject>,
-  subjectIds: number[],
-): Promise<{ since?: string; gains: Map<number, { gain: number; previous?: number }> }> {
-  const weeks = [addWeeks(week, -1), week, addWeeks(week, 1)];
-  const { results } = await db.prepare(
-    "SELECT week, subject, total, recorded FROM collection_snapshots WHERE week IN (?1, ?2, ?3)",
-  ).bind(...weeks).all<{ week: string; subject: number; total: number; recorded: number }>();
-  const counts = new Map<string, { total: number; recorded: number }>();
-  for (const row of results) counts.set(`${row.week}/${row.subject}`, row);
-  const gains = new Map<number, { gain: number; previous?: number }>();
-  let since: number | undefined;
-  for (const id of subjectIds) {
-    const entry = store.get(id);
-    const start = counts.get(`${week}/${id}`);
-    if (!entry || !start) continue;
-    const end = week === current
-      ? entry.briefAt != null && Math.floor(entry.briefAt / 1000) > start.recorded ? collectionTotal(entry.brief) : undefined
-      : counts.get(`${weeks[2]}/${id}`)?.total;
-    if (end == null) continue;
-    const before = counts.get(`${weeks[0]}/${id}`);
-    gains.set(id, { gain: end - start.total, ...(before ? { previous: start.total - before.total } : {}) });
-    since = Math.min(since ?? start.recorded, start.recorded);
-  }
-  return { ...(since != null ? { since: new Date(since * 1000).toISOString() } : {}), gains };
 }

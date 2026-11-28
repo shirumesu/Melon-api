@@ -6,7 +6,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
     openapi: "3.1.0",
     info: {
       title: "Melon API",
-      version: "0.2.2",
+      version: "0.3.0",
       description: [
         "Melon API 只提供 melonbang 客户端需要“所有用户共享一次计算”或“由维护者统一下发”的数据：季度完整目录索引、bangumi-data 与 Bangumi 日历合成的播出时间表、按 subjectId 关联的地区译名，以及在线来源规则快照。",
         "条目详情、章节、角色、制作人员、搜索和社区内容由客户端直接读取 Bangumi，不经过本服务。",
@@ -218,13 +218,11 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           description: [
             "以 date 为中心，返回前后 days 天的播出条目。默认 date 是上海时区今天，days=7，因此窗口是前 7 天到后 7 天。",
             "数据源优先使用 bangumi-data 的 broadcast 规则，并从 sites 中提取 Bangumi subjectId。没有 broadcast 但有 begin 的条目会使用 begin-weekly-fallback 兜底。",
-            "服务端会额外读取 Bangumi /calendar 和窗口涉及季度的目录，再逐个读取条目资料（评分、排名、收藏人数、简介）和正篇章节（按播出日期对上这一次播出的是第几话、是否最终话）。补不到时不会丢条目，而是通过 needsFallback、nsfwStatus 和 incomplete 明确告诉客户端。",
-            "Workers 每次调用最多 50 个外部请求，所以每次请求最多向 Bangumi 补 30 个条目，其余留给之后的请求和每半小时的定时任务；incomplete 大于 0 的时间表只缓存 1 分钟。",
-            "heat 是条目在 heat.week（窗口起点所在的周，周一 00:00 上海时间起）的热度，0–100，previousHeat 是前一周的（这周才开播的没有）。热度由三项组成：新增收藏 35%、本集吐槽 35%、在看人数 30%；每项先除以这一周所有条目里最高的再开平方，避免一部爆款把其他的压到一起。还没统计到新增收藏的条目只按另外两项算。",
-            "heatComments 是热度计入的吐槽数：这一周播出的最新一集；它刚播出不到两天或本周还没播时，与上一集取较多的；这周停播为 0。",
-            "collectionGain 是 heat.week 新增的 Bangumi 收藏人数：本周算到现在，往周算到下周开始；previousCollectionGain 是前一周的。服务端在每周第一次拿到新鲜资料时记下收藏人数，heat.since 是这一周最早记下的时间，还没记下时没有。",
+            "服务端会额外读取 Bangumi /calendar；条目资料（评分、排名、收藏人数、简介）按首播月份成批读取（同一个月有 3 部以上时，一次请求最多 100 部，30 分钟更新），其余逐个读取（2 小时更新）；正篇章节逐个读取，用来按播出日期对上这一次播出的是第几话、是否最终话，刚播出新一集的每小时更新，三天内的每 3 小时，其余每 12 小时。补不到时不会丢条目，而是通过 needsFallback、nsfwStatus 和 incomplete 明确告诉客户端。",
+            "Workers 每次调用最多 50 个外部请求，所以每次请求最多向 Bangumi 发 30 个请求，其余留给之后的请求和每 15 分钟的定时任务；定时任务会在到期前提前更新，请求只补缺失的和过期超过一轮的。incomplete 大于 0 的时间表只缓存 1 分钟。",
+            "heat、previousHeat、heatComments、collectionGain、previousCollectionGain 取自 /v1/schedule/heat 对 heat.week（窗口起点所在的周）的结果，字段含义见那里；时间表缓存 1 小时，所以这些值可能比 /v1/schedule/heat 旧，需要实时热度时读 /v1/schedule/heat。",
             "旧 days 是日期半径，因此 days=7 返回15天。推荐 startDate + dayCount 指定明确区间（如7天），view=byDate 或 items 避免重复数据；默认 both 保留旧响应。",
-            "完整的时间表缓存 1 小时，过期后先返回旧的再在后台更新。条目资料 6 小时、章节 12 小时更新一次。",
+            "完整的时间表缓存 1 小时，过期后先返回旧的再在后台更新。新鲜的响应同时缓存在边缘节点，到期前直接返回。",
           ].join("\n\n"),
           parameters: [
             queryParam("startDate", "string", "明确窗口起点（含），与 dayCount 配合；提供后不使用 date/days 窗口。", { format: "date" }),
@@ -270,6 +268,31 @@ export function openApiSpec(publicBaseUrl: string): unknown {
                 schemaRef("ScheduleResponse"),
                 objectSchema({ cache: cacheSchema }),
               ]),
+            ),
+            "500": errorResponse,
+          },
+        },
+      },
+      "/v1/schedule/heat": {
+        get: {
+          tags: ["时间表"],
+          summary: "获取一周的热度",
+          description: [
+            "返回 week 所在的那一周（周一 00:00 上海时间起）每部播出番剧的热度，按热度从高到低排列，供客户端排热度周榜。体积很小，适合在页面打开时轮询：本周的热度由每 15 分钟的定时任务重新计算并缓存 15 分钟，按 X-Cache-Expires-At 到期后再请求即可拿到新的；还有条目在补资料时只缓存 1 分钟。往周与下周缓存 6 小时，下周还没开始，shows 为空。",
+            "heat 为 0–100，由三项组成：新增收藏 35%、本集吐槽 35%、在看人数 30%；每项先除以这一周所有条目里最高的再开平方，避免一部爆款把其他的压到一起。还没统计到新增收藏的条目只按另外两项算。previousHeat 是同一批番剧在前一周的热度，只给前一周也播出的番剧。",
+            "comments 是热度计入的吐槽数：这一周播出的最新一集（按每次播出对上的章节，不按章节日期划周，周一凌晨播出、Bangumi 记在周日的一集也算这一周）；它播出不到两天时与上一集取较多的；本周还没播时取上一集；这周停播为 0。",
+            "gain 是这一周新增的 Bangumi 收藏人数：本周算到现在，往周算到下周开始；previousGain 是前一周的。服务端在每周第一次拿到新鲜资料时记下收藏人数，since 是这一周最早记下的时间，还没记下时没有。watching 是现在在看的人数。",
+            "只能查询前 6 周到下一周，其余返回 400。",
+          ].join("\n\n"),
+          parameters: [
+            queryParam("week", "string", "这一周里的任意一天，默认上海时区今天。", { format: "date" }),
+            forceQueryParam("是否绕过缓存重新计算。"),
+          ],
+          security: optionalBearerSecurity(),
+          responses: {
+            "200": response(
+              "一周的热度",
+              allOf([schemaRef("WeekHeat"), objectSchema({ cache: cacheSchema })]),
             ),
             "500": errorResponse,
           },
@@ -347,7 +370,7 @@ export function openApiSpec(publicBaseUrl: string): unknown {
           tags: ["内部"],
           summary: "刷新物化缓存",
           description: [
-            "触发 Worker 后台刷新当季与上一季的完整目录、bangumi-data、Bangumi 日历，再生成常用时间表。接口会立即返回 accepted=true，实际刷新在 waitUntil 中继续执行。",
+            "触发 Worker 后台刷新当季的热播与完整目录、bangumi-data 和 Bangumi 日历，与每天的定时任务相同。接口会立即返回 accepted=true，实际刷新在 waitUntil 中继续执行。",
             "如果配置了 ADMIN_TOKEN，必须带 Authorization: Bearer <ADMIN_TOKEN>。生产环境应始终配置 ADMIN_TOKEN。",
           ].join("\n\n"),
           security: [{ bearerAuth: [] }],
@@ -593,6 +616,31 @@ function schemas(): Record<string, unknown> {
         ),
       },
       ["generatedAt", "centerDate", "days", "window", "incomplete"],
+    ),
+    WeekHeat: objectSchema(
+      {
+        week: { type: "string", format: "date", description: "这一周的周一。" },
+        generatedAt: { type: "string", format: "date-time" },
+        since: { type: "string", format: "date-time", description: "这一周最早记下收藏人数的时间；还没记下时没有。" },
+        incomplete: { type: "integer", description: "这一周还在补资料或章节、因此没有热度的番剧数。" },
+        shows: {
+          type: "array",
+          description: "按 heat 从高到低。",
+          items: objectSchema(
+            {
+              subjectId: idSchema("Bangumi subject ID。"),
+              heat: { type: "number", description: "0–100，保留一位小数。" },
+              previousHeat: { type: "number", description: "前一周的热度；前一周没有播出的没有。" },
+              comments: { type: "integer", description: "热度计入的吐槽数。" },
+              gain: { type: "integer", description: "这一周新增收藏人数；还没统计到时没有。" },
+              previousGain: { type: "integer", description: "前一周新增收藏人数。" },
+              watching: { type: "integer", description: "现在在看的 Bangumi 用户数。" },
+            },
+            ["subjectId", "heat", "comments"],
+          ),
+        },
+      },
+      ["week", "generatedAt", "incomplete", "shows"],
     ),
     ScheduleOccurrence: objectSchema(
       {

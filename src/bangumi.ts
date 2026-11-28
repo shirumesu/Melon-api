@@ -134,6 +134,15 @@ export class BangumiClient {
     return this.mapSubjectListItem(subject);
   }
 
+  /** Anime premiering in [month] (`YYYY-MM`), up to 100 from [offset], and how many there are. */
+  async browseMonth(month: string, offset: number): Promise<{ total: number; data: SubjectListItem[] }> {
+    const [year, number] = month.split("-").map(Number);
+    const page = await this.fetchJson<{ total: number; data: BangumiSubject[] }>(
+      `/v0/subjects?type=2&year=${year}&month=${number}&limit=100&offset=${offset}`,
+    );
+    return { total: page.total, data: page.data.map((subject) => this.mapSubjectListItem(subject)) };
+  }
+
   /**
    * Main episodes at [offset], up to 100, and how many the subject has.
    * Undated or placeholder entries (Bangumi dates unaired ones 2099) are

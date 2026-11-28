@@ -57,19 +57,6 @@ export function dateParam(value: string | null, fallback = currentShanghaiDate()
   return value;
 }
 
-export function readListParam(url: URL, name: string): string[] {
-  const inputs = [...url.searchParams.getAll(name), ...url.searchParams.getAll(`${name}s`)];
-  const values = inputs.flatMap((value): string[] => {
-    if (!value.trim().startsWith("[")) return value.split(",");
-    try {
-      const parsed: unknown = JSON.parse(value);
-      if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")) return parsed;
-    } catch { /* Invalid arrays are rejected below. */ }
-    throw new HttpError(400, "INVALID_PARAMETER", `${name} must contain strings.`);
-  });
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
-}
-
 export function requireAdmin(request: Request, env: Env): Response | null {
   if (!env.ADMIN_TOKEN) {
     return errorJson(
@@ -160,27 +147,19 @@ export function toInt(value: unknown): number | undefined {
     : undefined;
 }
 
-export function htmlDecode(value: string): string {
-  return value
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&#x2F;/g, "/")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/\s+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-export function stripTags(value: string): string {
-  return htmlDecode(value).replace(/\s+/g, " ").trim();
-}
-
 export function currentShanghaiDate(): string {
   return shanghaiDateString(new Date());
+}
+
+/** The moment [date], YYYY-MM-DD, begins in Shanghai. */
+export function shanghaiDayStart(date: string): Date {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year!, month! - 1, day!) - 8 * 60 * 60 * 1000);
+}
+
+/** [date], YYYY-MM-DD, moved by [days]. */
+export function addDays(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 export function shanghaiDateString(date: Date): string {

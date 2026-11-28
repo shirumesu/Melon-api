@@ -32,6 +32,7 @@ pattern = "melonapi.konataizumi.com"
 custom_domain = true
 
 [triggers]
-# Daily at 00:00 Shanghai time: season lists and bangumi-data. Every half
-# hour: the schedules clients open (src/index.ts names the daily one).
-crons = ["0 16 * * *", "*/30 * * * *"]
+# Daily at 00:00 Shanghai time: season lists and bangumi-data. Every 15
+# minutes: weekly heat and the schedules clients open (src/index.ts names the
+# daily one; src/schedule_subjects.ts knows the interval).
+crons = ["0 16 * * *", "*/15 * * * *"]
