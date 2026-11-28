@@ -206,35 +206,155 @@ async function recordSnapshots(env: Env, store: Map<number, ScheduleSubject>): P
   if (rows.length) await env.DB.batch(rows);
 }
 
+/** What a show's weekly heat counts, and how much of it. */
+const HEAT_PARTS = [
+  { weight: 0.35, value: (show: HeatInput) => show.gain },
+  { weight: 0.35, value: (show: HeatInput) => show.comments },
+  { weight: 0.3, value: (show: HeatInput) => show.watching },
+];
+
+type HeatInput = { id: number; gain?: number; comments: number; watching?: number };
+
+/** A show's heat in a week, and what it was made of. */
+export type ShowHeat = {
+  /** 0 to 100 among the week's shows. */
+  heat: number;
+  /** The week before's; absent for a show that began this week. */
+  previousHeat?: number;
+  /** The episode comments counted (see [weekComments]). */
+  comments: number;
+  /** Collections gained in the week and the week before, once counted. */
+  gain?: number;
+  previousGain?: number;
+};
+
 export type WeeklyHeat = {
   week: string;
-  since: string;
-  gains: Map<number, { gain: number; previous?: number }>;
+  /** When the week's collection count began; absent before any was kept. */
+  since?: string;
+  shows: Map<number, ShowHeat>;
 };
 
 /**
- * Collections each subject gained in [week]: until now for the current
- * week, between its start and the next week's start for an earlier one.
- * Null for a later week, without D1, or before any count was kept.
+ * Each of [subjectIds]' heat in [week] and the week before: collections
+ * gained, episode comments and Bangumi users watching, each taken as the
+ * square root of its share of the week's highest so one hit does not flatten
+ * the rest, then weighted 35/35/30. A show whose gain is not counted yet is
+ * scored on the other two. Null for a later week.
  */
 export async function weeklyHeat(
   env: Env,
   week: string,
   store: Map<number, ScheduleSubject>,
+  subjectIds: number[],
 ): Promise<WeeklyHeat | null> {
-  const current = weekOf(shanghaiDateString(new Date()));
-  if (!env.DB || week > current) return null;
+  const today = shanghaiDateString(new Date());
+  const current = weekOf(today);
+  if (week > current) return null;
+  const counted = env.DB ? await collectionGains(env.DB, week, current, store, subjectIds) : undefined;
+  const shows = subjectIds.flatMap((id) => {
+    const entry = store.get(id);
+    return entry?.brief ? [{ id, entry, brief: entry.brief }] : [];
+  });
+  const previousWeek = addWeeks(week, -1);
+  const comments = new Map(shows.map(({ id, entry }) => [id, weekComments(entry, week, today)]));
+  const heat = heatScores(shows.map(({ id, brief }) => ({
+    id,
+    gain: counted?.gains.get(id)?.gain,
+    comments: comments.get(id)!,
+    watching: brief.collectionStats?.watching,
+  })));
+  const previousHeat = heatScores(shows
+    .filter(({ entry, brief }) => began(entry, brief, week))
+    .map(({ id, entry, brief }) => ({
+      id,
+      gain: counted?.gains.get(id)?.previous,
+      comments: weekComments(entry, previousWeek, today),
+      watching: brief.collectionStats?.watching,
+    })));
+  return {
+    week,
+    ...(counted?.since ? { since: counted.since } : {}),
+    shows: new Map(shows.map(({ id }) => {
+      const gain = counted?.gains.get(id);
+      return [id, {
+        heat: heat.get(id)!,
+        ...(previousHeat.has(id) ? { previousHeat: previousHeat.get(id) } : {}),
+        comments: comments.get(id)!,
+        ...(gain ? { gain: gain.gain, ...(gain.previous != null ? { previousGain: gain.previous } : {}) } : {}),
+      }];
+    })),
+  };
+}
+
+function heatScores(shows: HeatInput[]): Map<number, number> {
+  const parts = HEAT_PARTS.map((part) => ({
+    ...part,
+    top: shows.reduce((top, show) => Math.max(top, part.value(show) ?? 0), 0),
+  }));
+  return new Map(shows.map((show) => {
+    let sum = 0, weights = 0;
+    for (const part of parts) {
+      const value = part.value(show);
+      if (value == null || part.top <= 0) continue;
+      sum += part.weight * Math.sqrt(Math.max(0, value) / part.top);
+      weights += part.weight;
+    }
+    return [show.id, weights ? Math.round((1000 * sum) / weights) / 10 : 0];
+  }));
+}
+
+/**
+ * The comments on a show's episode of [week]: the latest one aired by
+ * [today], or, while that is under two days old or still to come, the one
+ * before it when that has more. None when no episode falls in the week.
+ */
+function weekComments(entry: ScheduleSubject, week: string, today: string): number {
+  const end = addWeeks(week, 1);
+  const episodes = (entry.episodes ?? [])
+    .filter((episode) => episode.airdate < end)
+    .sort((a, b) => a.airdate.localeCompare(b.airdate) || a.sort - b.sort);
+  if (!episodes.some((episode) => episode.airdate >= week)) return 0;
+  const aired = episodes.filter((episode) => episode.airdate <= today);
+  const latest = aired.at(-1);
+  if (!latest) return 0;
+  const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - DAY_MS).toISOString().slice(0, 10);
+  const before = aired.at(-2);
+  return latest.airdate >= yesterday && before
+    ? Math.max(latest.comments, before.comments)
+    : latest.comments;
+}
+
+/** Whether a show was airing before [week], so it has a heat then. */
+function began(entry: ScheduleSubject, brief: SubjectListItem, week: string): boolean {
+  return (brief.airDate != null && brief.airDate < week) ||
+    (entry.episodes ?? []).some((episode) => episode.airdate < week);
+}
+
+/**
+ * Collections each subject gained in [week]: until now for the current
+ * week, between its start and the next week's start for an earlier one;
+ * and in the week before. None before any count was kept.
+ */
+async function collectionGains(
+  db: D1Database,
+  week: string,
+  current: string,
+  store: Map<number, ScheduleSubject>,
+  subjectIds: number[],
+): Promise<{ since?: string; gains: Map<number, { gain: number; previous?: number }> }> {
   const weeks = [addWeeks(week, -1), week, addWeeks(week, 1)];
-  const { results } = await env.DB.prepare(
+  const { results } = await db.prepare(
     "SELECT week, subject, total, recorded FROM collection_snapshots WHERE week IN (?1, ?2, ?3)",
   ).bind(...weeks).all<{ week: string; subject: number; total: number; recorded: number }>();
   const counts = new Map<string, { total: number; recorded: number }>();
   for (const row of results) counts.set(`${row.week}/${row.subject}`, row);
   const gains = new Map<number, { gain: number; previous?: number }>();
   let since: number | undefined;
-  for (const [id, entry] of store) {
+  for (const id of subjectIds) {
+    const entry = store.get(id);
     const start = counts.get(`${week}/${id}`);
-    if (!start) continue;
+    if (!entry || !start) continue;
     const end = week === current
       ? entry.briefAt != null && Math.floor(entry.briefAt / 1000) > start.recorded ? collectionTotal(entry.brief) : undefined
       : counts.get(`${weeks[2]}/${id}`)?.total;
@@ -243,5 +363,5 @@ export async function weeklyHeat(
     gains.set(id, { gain: end - start.total, ...(before ? { previous: start.total - before.total } : {}) });
     since = Math.min(since ?? start.recorded, start.recorded);
   }
-  return since == null ? null : { week, since: new Date(since * 1000).toISOString(), gains };
+  return { ...(since != null ? { since: new Date(since * 1000).toISOString() } : {}), gains };
 }

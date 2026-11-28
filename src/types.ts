@@ -104,6 +104,11 @@ export type ScheduleOccurrence = {
   episode?: EpisodeBrief & { final: boolean };
   /** Without an episode that day but with ones before and after: when the next airs. */
   breakUntil?: string;
+  /** The show's heat in the response's heat week, 0 to 100, and the week before's. */
+  heat?: number;
+  previousHeat?: number;
+  /** The episode comments the heat counted. */
+  heatComments?: number;
   /** Collections the subject gained in the response's heat week, and the week before. */
   collectionGain?: number;
   previousCollectionGain?: number;
@@ -146,8 +151,8 @@ export type ScheduleResponse = {
   byDate?: Record<string, ScheduleOccurrence[]>;
   /** Subjects in the window whose details or episodes are still being fetched. */
   incomplete: number;
-  /** The Monday-start week collectionGain counts, and since when. */
-  heat?: { week: string; since: string };
+  /** The Monday-start week heat covers, and since when collections were counted. */
+  heat?: { week: string; since?: string };
 };
 
 export type SeasonInfo = {

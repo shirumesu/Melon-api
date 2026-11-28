@@ -92,7 +92,7 @@ export async function buildScheduleResponse(
   const { enrichment, store } = await loadScheduleEnrichment(
     env, windowStart, windowEnd, subjectIds, budget, input.force, background,
   );
-  const heat = await weeklyHeat(env, weekOf(shanghaiDateString(windowStart)), store);
+  const heat = await weeklyHeat(env, weekOf(shanghaiDateString(windowStart)), store, subjectIds);
   const items = buildSchedule(data.items ?? [], windowStart, windowEnd, {
     requireBroadcast: input.requireBroadcast ?? false,
     includeNsfw: input.includeNsfw ?? false,
@@ -112,7 +112,7 @@ export async function buildScheduleResponse(
     },
     items,
     incomplete: subjectIds.filter((id) => pending(store.get(id))).length,
-    ...(heat ? { heat: { week: heat.week, since: heat.since } } : {}),
+    ...(heat ? { heat: { week: heat.week, ...(heat.since ? { since: heat.since } : {}) } } : {}),
   };
 }
 
@@ -277,7 +277,7 @@ function buildSchedule(
     if (!options.includeNsfw && enriched?.nsfw === true) continue;
     if (!options.includeUnknownNsfw && enriched?.nsfw == null) continue;
     const stored = subjectId ? options.store.get(subjectId) : undefined;
-    const heat = subjectId ? options.heat?.gains.get(subjectId) : undefined;
+    const heat = subjectId ? options.heat?.shows.get(subjectId) : undefined;
 
     for (const occurrence of occurrences) {
       const episode = stored && airingEpisode(stored, occurrence, enriched?.episodeTotal);
@@ -302,7 +302,15 @@ function buildSchedule(
         collectionStats: enriched?.collectionStats,
         ...(episode ? { episode } : {}),
         ...(resumes ? { breakUntil: resumes } : {}),
-        ...(heat ? { collectionGain: heat.gain, previousCollectionGain: heat.previous } : {}),
+        ...(heat
+          ? {
+            heat: heat.heat,
+            previousHeat: heat.previousHeat,
+            heatComments: heat.comments,
+            collectionGain: heat.gain,
+            previousCollectionGain: heat.previousGain,
+          }
+          : {}),
         tags: enriched?.tags ?? [],
         metaTags: enriched?.metaTags ?? [],
         nsfw: enriched?.nsfw,
